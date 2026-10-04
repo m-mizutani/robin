@@ -13,6 +13,13 @@ features:
   bot_user:
     display_name: robin
     always_online: true
+  shortcuts:
+    # Shown in the "More actions" menu of every message; Robin deletes only
+    # its own messages, and only for the user who asked for them.
+    - name: Delete Robin message
+      type: message
+      callback_id: robin_delete_message
+      description: Delete a message Robin posted for you
 oauth_config:
   redirect_urls:
     - https://robin.example.com/api/v1/auth/callback
@@ -20,8 +27,14 @@ oauth_config:
     bot:
       # Receive app_mention events.
       - app_mentions:read
-      # Post replies (chat.postMessage) and login prompts (chat.postEphemeral).
+      # Post, update and delete Robin's messages (chat.postMessage,
+      # chat.update, chat.delete) and post login prompts (chat.postEphemeral).
       - chat:write
+      # Read the thread of a mention (conversations.replies) in public
+      # channels, private channels and group DMs.
+      - channels:history
+      - groups:history
+      - mpim:history
       # Read the display name of a user who signs in (users.info).
       - users:read
     user:
@@ -33,6 +46,9 @@ settings:
     request_url: https://robin.example.com/hooks/slack/event
     bot_events:
       - app_mention
+  interactivity:
+    is_enabled: true
+    request_url: https://robin.example.com/hooks/slack/interaction
   org_deploy_enabled: false
   socket_mode_enabled: false
   # Robin stores long-lived user tokens. Token rotation cannot be turned off

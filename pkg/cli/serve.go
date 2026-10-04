@@ -8,9 +8,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/m-mizutani/goerr/v2"
 	"github.com/urfave/cli/v3"
 
+	"github.com/m-mizutani/robin/pkg/adapter/claude"
 	githubadapter "github.com/m-mizutani/robin/pkg/adapter/github"
 	googleadapter "github.com/m-mizutani/robin/pkg/adapter/google"
 	"github.com/m-mizutani/robin/pkg/adapter/localcipher"
@@ -20,6 +22,7 @@ import (
 	httpctrl "github.com/m-mizutani/robin/pkg/controller/http"
 	"github.com/m-mizutani/robin/pkg/domain/interfaces"
 	"github.com/m-mizutani/robin/pkg/usecase"
+	"github.com/m-mizutani/robin/pkg/usecase/agents/mention"
 	"github.com/m-mizutani/robin/pkg/utils/async"
 	"github.com/m-mizutani/robin/pkg/utils/logging"
 	"github.com/m-mizutani/robin/pkg/utils/safe"
@@ -39,12 +42,33 @@ const (
 	// notionHTTPTimeout bounds one call to Notion, so a request handler is
 	// not held forever when Notion does not answer.
 	notionHTTPTimeout = 30 * time.Second
+	// googleRequestTimeout bounds one call to Gmail, Drive or Calendar.
+	googleRequestTimeout = 30 * time.Second
+
+	// Limits of one agent run. The cost limit, the model and its prices are
+	// in the settings file.
+	agentBudgetNoticeRatio = 0.9
+	agentMaxLLMCalls       = 20
+	agentMaxToolCalls      = 10
+	agentTimeout           = 10 * time.Minute
+	agentLeaseMargin       = time.Minute
+	agentToolResultLimit   = 20000
+	agentThreadLimit       = 50
+	agentThreadCharLimit   = 20000
+	// agentHistoryByteLimit keeps the messages of one answer, which are
+	// stored in one Firestore transaction, below the 10 MiB request limit
+	// with room for the last call.
+	agentHistoryByteLimit = 8 << 20
+	llmMaxTokens          = 16000
+	llmEffort             = anthropic.BetaOutputConfigEffortMedium
 )
 
 type serveConfig struct {
+	file       config.File
 	server     config.Server
 	repository config.Repository
 	slack      config.Slack
+	llm        config.LLM
 	kms        config.KMS
 	google     config.Google
 	notion     config.Notion
@@ -54,9 +78,11 @@ type serveConfig struct {
 
 func (c *serveConfig) flags() []cli.Flag {
 	var flags []cli.Flag
+	flags = append(flags, c.file.Flags()...)
 	flags = append(flags, c.server.Flags()...)
 	flags = append(flags, c.repository.Flags()...)
 	flags = append(flags, c.slack.Flags()...)
+	flags = append(flags, c.llm.Flags()...)
 	flags = append(flags, c.kms.Flags()...)
 	flags = append(flags, c.google.Flags()...)
 	flags = append(flags, c.notion.Flags()...)
@@ -74,7 +100,14 @@ func (c *serveConfig) validate() error {
 	if err := c.notion.Validate(c.noAuth.Enabled()); err != nil {
 		return err
 	}
+	if err := c.validateAuth(); err != nil {
+		return err
+	}
+	// The agent answers Slack mentions, so the LLM is needed only with events.
+	return c.llm.Validate(c.slack.EventsEnabled())
+}
 
+func (c *serveConfig) validateAuth() error {
 	if !c.noAuth.Enabled() {
 		if err := c.slack.Validate(); err != nil {
 			return err
@@ -111,6 +144,10 @@ func cmdServe() *cli.Command {
 
 func runServe(ctx context.Context, cfg *serveConfig) error {
 	if err := cfg.validate(); err != nil {
+		return err
+	}
+	settings, err := cfg.file.Load(ctx)
+	if err != nil {
 		return err
 	}
 
@@ -162,21 +199,19 @@ func runServe(ctx context.Context, cfg *serveConfig) error {
 	access := usecase.NewSlackUserAccess(repo, cipher, userClients)
 	authUC := usecase.NewAuthUseCase(repo, oauth, bot, access, userClients, authCfg)
 
+	// The Access components are shared by the settings page and the agent,
+	// so each token has one owner in the process.
 	var httpOpts []httpctrl.Option
-	if cfg.slack.EventsEnabled() {
-		slackUC := usecase.NewSlackEventUseCase(repo, bot, access, usecase.SlackEventConfig{
-			TeamID:        cfg.slack.TeamID(),
-			BaseURL:       cfg.server.BaseURL(),
-			EventClaimTTL: slackEventClaimTTL,
-		})
-		httpOpts = append(httpOpts, httpctrl.WithSlackEvents(slackUC, cfg.slack.SigningSecret()))
-	}
+	var services mention.Services
 	if cfg.google.Enabled() {
+		googleAccess := usecase.NewGoogleWorkspaceAccess(repo, cipher, googleadapter.NewWorkspaceClientFactory(
+			cfg.google.ClientID(), cfg.google.ClientSecret(), &http.Client{Timeout: googleRequestTimeout}))
 		googleUC := usecase.NewGoogleWorkspaceUseCase(
 			googleadapter.NewOAuth(cfg.google.ClientID(), cfg.google.ClientSecret()),
-			usecase.NewGoogleWorkspaceAccess(repo, cipher),
+			googleAccess,
 			usecase.GoogleWorkspaceConfig{BaseURL: cfg.server.BaseURL()},
 		)
+		services.Google = googleAccess
 		httpOpts = append(httpOpts, httpctrl.WithGoogleWorkspace(googleUC))
 	}
 	if cfg.notion.Enabled() {
@@ -188,17 +223,53 @@ func runServe(ctx context.Context, cfg *serveConfig) error {
 			BaseURL:     cfg.server.BaseURL(),
 			WorkspaceID: cfg.notion.WorkspaceID(),
 		})
+		services.Notion = notionAccess
 		httpOpts = append(httpOpts, httpctrl.WithNotion(notionUC))
 	}
 	if cfg.github.Enabled() {
 		httpClient := &http.Client{Timeout: githubRequestTimeout}
 		githubOAuth := githubadapter.NewOAuth(cfg.github.ClientID(), cfg.github.ClientSecret(), httpClient)
 		githubUsers := githubadapter.NewUserClientFactory(httpClient)
-		githubUC := usecase.NewGitHubUseCase(githubOAuth, githubUsers,
-			usecase.NewGitHubUserAccess(repo, cipher, githubOAuth, githubUsers),
+		githubAccess := usecase.NewGitHubUserAccess(repo, cipher, githubOAuth, githubUsers)
+		githubUC := usecase.NewGitHubUseCase(githubOAuth, githubUsers, githubAccess,
 			usecase.GitHubConfig{BaseURL: cfg.server.BaseURL()},
 		)
+		services.GitHub = githubAccess
 		httpOpts = append(httpOpts, httpctrl.WithGitHub(githubUC))
+	}
+	if cfg.slack.EventsEnabled() {
+		llmOpts, err := cfg.llm.Configure(ctx)
+		if err != nil {
+			return err
+		}
+		llm := claude.New(claude.Config{Model: settings.Model, MaxTokens: llmMaxTokens, Effort: llmEffort}, llmOpts...)
+		agent, err := mention.New(repo, llm, bot, services, mention.Config{
+			BaseURL:          cfg.server.BaseURL(),
+			Rate:             settings.Rate,
+			Budget:           settings.Budget,
+			NoticeRatio:      agentBudgetNoticeRatio,
+			MaxLLMCalls:      agentMaxLLMCalls,
+			MaxToolCalls:     agentMaxToolCalls,
+			Timeout:          agentTimeout,
+			LeaseMargin:      agentLeaseMargin,
+			SessionTTL:       settings.SessionTTL,
+			ToolResultLimit:  agentToolResultLimit,
+			ThreadLimit:      agentThreadLimit,
+			ThreadCharLimit:  agentThreadCharLimit,
+			HistoryByteLimit: agentHistoryByteLimit,
+		})
+		if err != nil {
+			return goerr.Wrap(err, "failed to build the agent")
+		}
+		slackUC := usecase.NewSlackEventUseCase(repo, bot, access, agent, usecase.SlackEventConfig{
+			TeamID:        cfg.slack.TeamID(),
+			BaseURL:       cfg.server.BaseURL(),
+			EventClaimTTL: slackEventClaimTTL,
+		})
+		httpOpts = append(httpOpts, httpctrl.WithSlackEvents(slackUC, cfg.slack.SigningSecret()))
+		logging.Default().Info("slack agent enabled",
+			"provider", settings.Provider, "model", settings.Model, "vertex", cfg.llm.UsesVertex(),
+			"budget_usd", settings.Budget.USD(), "session_ttl", settings.SessionTTL.String())
 	}
 
 	handler, err := httpctrl.New(authUC, httpctrl.Config{BaseURL: cfg.server.BaseURL()}, httpOpts...)

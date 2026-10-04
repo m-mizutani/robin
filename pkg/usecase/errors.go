@@ -81,4 +81,12 @@ var (
 	// ErrGitHubRefreshTimeout means another instance kept refreshing the
 	// user's token for longer than the wait limit.
 	ErrGitHubRefreshTimeout = errors.New("timed out waiting for the github token refresh")
+
+	// ErrGoogleWorkspaceReconnectRequired means Google rejected the stored
+	// refresh token; the user has to disconnect and connect again.
+	ErrGoogleWorkspaceReconnectRequired = errors.New("google workspace needs to be reconnected")
+
+	// ErrThreadOwnedByOther means another user owns the conversation of the
+	// thread a mention was posted in.
+	ErrThreadOwnedByOther = errors.New("thread is owned by another user")
 )

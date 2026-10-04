@@ -17,3 +17,20 @@ type GoogleOAuth interface {
 	// invalid is reported as ErrGoogleTokenInvalid.
 	Revoke(ctx context.Context, token string) error
 }
+
+// GoogleWorkspaceClientFactory builds a client that reads Google Workspace
+// with one user's refresh token.
+type GoogleWorkspaceClientFactory interface {
+	New(token model.GoogleRefreshToken) GoogleWorkspaceClient
+}
+
+// GoogleWorkspaceClient fails with ErrGoogleTokenInvalid when Google rejects
+// the refresh token and with ErrGoogleNotFound on 404.
+type GoogleWorkspaceClient interface {
+	SearchGmail(ctx context.Context, q model.GmailSearchQuery) ([]model.GmailMessageSummary, error)
+	GetGmailMessage(ctx context.Context, id string) (*model.GmailMessage, error)
+	SearchDrive(ctx context.Context, q model.DriveSearchQuery) ([]model.DriveFile, error)
+	// GetDriveFileText fails with ErrGoogleUnsupportedFile for a file it cannot turn into text.
+	GetDriveFileText(ctx context.Context, id string) (*model.DriveFileText, error)
+	ListCalendarEvents(ctx context.Context, q model.CalendarEventQuery) ([]model.CalendarEvent, error)
+}

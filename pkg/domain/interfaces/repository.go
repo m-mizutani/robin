@@ -19,7 +19,31 @@ type Repository interface {
 	GitHubCredential() GitHubCredentialRepository
 	Session() SessionRepository
 	SlackEvent() SlackEventRepository
+	AgentSession() AgentSessionRepository
 	Close() error
+}
+
+// AgentSessionRepository keeps the conversation of one Slack thread under the
+// user who started it. The owner of a thread is recorded outside the user's
+// document; it is written together with the session and never returned.
+type AgentSessionRepository interface {
+	// Begin starts a run of key on the thread, in one transaction. It returns
+	// OwnedByOther when another user owns an unexpired session of the thread,
+	// Busy when key's session holds an unexpired lease, Resumed with the lease
+	// taken when key's session is unexpired, and Started after writing a new
+	// session (new generation) and the owner record otherwise.
+	Begin(ctx context.Context, key model.UserKey, req model.AgentSessionBeginRequest) (*model.AgentSessionBeginResult, error)
+	// OwnedByOther reports whether a user other than key owns an unexpired
+	// session of the thread.
+	OwnedByOther(ctx context.Context, key model.UserKey, id model.AgentSessionID, now time.Time) (bool, error)
+	// ListMessages returns the messages of the generation, ordered by Seq.
+	ListMessages(ctx context.Context, key model.UserKey, id model.AgentSessionID, generation string) ([]*model.AgentSessionMessage, error)
+	// Commit appends c.Messages, numbered from the stored MessageCount, updates
+	// MessageCount, LastMentionTS and UpdatedAt, and clears the lease, only
+	// while leaseID holds the lease. It reports whether it wrote.
+	Commit(ctx context.Context, key model.UserKey, id model.AgentSessionID, leaseID string, c model.AgentSessionCommit) (bool, error)
+	// Release clears the lease when leaseID holds it. A missing session is not an error.
+	Release(ctx context.Context, key model.UserKey, id model.AgentSessionID, leaseID string) error
 }
 
 type UserRepository interface {

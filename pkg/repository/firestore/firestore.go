@@ -29,6 +29,12 @@ const (
 	githubAccountsCollection = "githubAccounts"
 	sessionsCollection       = "sessions"
 	slackEventsCollection    = "slackEvents"
+	agentSessionsCollection  = "agentSessions"
+	// agentSessionMessagesCollection is a subcollection of one agent session.
+	agentSessionMessagesCollection = "agentSessionMessages"
+	// agentThreadsCollection is keyed by the agent session ID and names the
+	// only user who owns the conversation of the thread.
+	agentThreadsCollection = "agentThreads"
 )
 
 type Firestore struct {
@@ -40,6 +46,7 @@ type Firestore struct {
 	githubCredential          *githubCredentialRepository
 	session                   *sessionRepository
 	slackEvent                *slackEventRepository
+	agentSession              *agentSessionRepository
 }
 
 var _ interfaces.Repository = &Firestore{}
@@ -69,6 +76,7 @@ func New(ctx context.Context, projectID, databaseID string) (*Firestore, error) 
 		githubCredential:          &githubCredentialRepository{client: client},
 		session:                   &sessionRepository{client: client},
 		slackEvent:                &slackEventRepository{client: client},
+		agentSession:              &agentSessionRepository{client: client},
 	}, nil
 }
 
@@ -85,6 +93,9 @@ func (f *Firestore) GitHubCredential() interfaces.GitHubCredentialRepository {
 }
 func (f *Firestore) Session() interfaces.SessionRepository       { return f.session }
 func (f *Firestore) SlackEvent() interfaces.SlackEventRepository { return f.slackEvent }
+func (f *Firestore) AgentSession() interfaces.AgentSessionRepository {
+	return f.agentSession
+}
 
 func (f *Firestore) Close() error {
 	return f.client.Close()

@@ -24,6 +24,8 @@ var (
 	GitHubRefreshTokenAADForTest = githubRefreshTokenAAD
 )
 
+var StartPhrasesForTest = startPhrases
+
 // SetClockForTest replaces the clock, the wait between polls, and the ID
 // generator of GitHubUserAccess.
 func (a *GitHubUserAccess) SetClockForTest(now func() time.Time, sleep func(ctx context.Context, d time.Duration) error, newID func() string) {

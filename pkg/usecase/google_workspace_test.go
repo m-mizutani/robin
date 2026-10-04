@@ -114,7 +114,7 @@ func newGoogleFixture() *googleFixture {
 		oauth:  newFakeGoogleOAuth(),
 		now:    time.Date(2026, 9, 29, 10, 0, 0, 0, time.UTC),
 	}
-	f.uc = usecase.NewGoogleWorkspaceUseCase(f.oauth, usecase.NewGoogleWorkspaceAccess(f.repo, f.cipher),
+	f.uc = usecase.NewGoogleWorkspaceUseCase(f.oauth, usecase.NewGoogleWorkspaceAccess(f.repo, f.cipher, nil),
 		usecase.GoogleWorkspaceConfig{BaseURL: "https://robin.example.com"})
 	f.uc.SetNowForTest(func() time.Time { return f.now })
 	return f
@@ -250,7 +250,7 @@ func TestGoogleWorkspaceUseCase_HandleCallbackRejects(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := newGoogleFixture()
 			if tc.connectedToOther {
-				gt.NoError(t, usecase.NewGoogleWorkspaceAccess(f.repo, f.cipher).
+				gt.NoError(t, usecase.NewGoogleWorkspaceAccess(f.repo, f.cipher, nil).
 					Store(context.Background(), otherKey, "refresh-other", googleScopes, aliceIdentity, f.now)).Required()
 			}
 			tc.setup(f)
@@ -322,9 +322,9 @@ func TestGoogleWorkspaceUseCase_ConflictFoundWhenStoring(t *testing.T) {
 	repo := memory.New()
 	cipher := &fakeCipher{}
 	oauth := newFakeGoogleOAuth()
-	uc := usecase.NewGoogleWorkspaceUseCase(oauth, usecase.NewGoogleWorkspaceAccess(racingRepository{repo}, cipher),
+	uc := usecase.NewGoogleWorkspaceUseCase(oauth, usecase.NewGoogleWorkspaceAccess(racingRepository{repo}, cipher, nil),
 		usecase.GoogleWorkspaceConfig{BaseURL: "https://robin.example.com"})
-	gt.NoError(t, usecase.NewGoogleWorkspaceAccess(repo, cipher).
+	gt.NoError(t, usecase.NewGoogleWorkspaceAccess(repo, cipher, nil).
 		Store(ctx, otherKey, "refresh-other", googleScopes, aliceIdentity, time.Now())).Required()
 
 	err := uc.HandleCallback(ctx, testKey, "code-1")
@@ -350,7 +350,7 @@ func TestGoogleWorkspaceUseCase_ReconnectAfterDisconnect(t *testing.T) {
 	gt.String(t, cred.Email).Equal("bob@example.com")
 
 	// The first account is free again for another user.
-	inUse, err := usecase.NewGoogleWorkspaceAccess(f.repo, f.cipher).AccountInUse(ctx, otherKey, aliceIdentity.Subject)
+	inUse, err := usecase.NewGoogleWorkspaceAccess(f.repo, f.cipher, nil).AccountInUse(ctx, otherKey, aliceIdentity.Subject)
 	gt.NoError(t, err).Required()
 	gt.Bool(t, inUse).False()
 }

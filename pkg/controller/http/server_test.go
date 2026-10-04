@@ -106,8 +106,22 @@ func (f *fakeAuthUseCase) Me(_ context.Context, key model.UserKey) (*usecase.Me,
 }
 
 type fakeSlackEventUseCase struct {
-	mu     sync.Mutex
-	events []*slackevents.EventsAPIEvent
+	mu        sync.Mutex
+	events    []*slackevents.EventsAPIEvent
+	shortcuts []model.SlackMessageShortcut
+}
+
+func (f *fakeSlackEventUseCase) HandleMessageShortcut(_ context.Context, s model.SlackMessageShortcut) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.shortcuts = append(f.shortcuts, s)
+	return nil
+}
+
+func (f *fakeSlackEventUseCase) handledShortcuts() []model.SlackMessageShortcut {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]model.SlackMessageShortcut(nil), f.shortcuts...)
 }
 
 func (f *fakeSlackEventUseCase) HandleEvent(_ context.Context, event *slackevents.EventsAPIEvent) error {
@@ -142,10 +156,12 @@ func TestServer_WithoutSlackEvents(t *testing.T) {
 	srv, err := httpctrl.New(newFakeAuthUseCase(), httpctrl.Config{BaseURL: "http://localhost:8080", Static: testStatic})
 	gt.NoError(t, err).Required()
 
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/hooks/slack/event", nil))
-	gt.Number(t, w.Code).NotEqual(http.StatusOK)
-	gt.Number(t, w.Code).NotEqual(http.StatusUnauthorized)
+	for _, path := range []string{"/hooks/slack/event", "/hooks/slack/interaction"} {
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, httptest.NewRequest(http.MethodPost, path, nil))
+		gt.Number(t, w.Code).NotEqual(http.StatusOK)
+		gt.Number(t, w.Code).NotEqual(http.StatusUnauthorized)
+	}
 }
 
 func TestServer_SlackEventsNeedSigningSecret(t *testing.T) {

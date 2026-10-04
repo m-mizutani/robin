@@ -1,0 +1,3 @@
+[agent]
+budget_usd = 2.0
+max_llm_calls = 50

@@ -134,6 +134,26 @@ type fakeGitHubUserClient struct {
 	token model.GitHubAccessToken
 }
 
+// The read methods are not used by the tests of this package; the agents
+// test the reads with their own clients.
+var errGitHubReadNotUsed = errors.New("github reads are not used in usecase tests")
+
+func (c *fakeGitHubUserClient) SearchIssues(context.Context, string, int) ([]model.GitHubIssueSummary, error) {
+	return nil, errGitHubReadNotUsed
+}
+
+func (c *fakeGitHubUserClient) SearchCode(context.Context, string, int) ([]model.GitHubCodeHit, error) {
+	return nil, errGitHubReadNotUsed
+}
+
+func (c *fakeGitHubUserClient) GetIssue(context.Context, string, string, int) (*model.GitHubIssue, error) {
+	return nil, errGitHubReadNotUsed
+}
+
+func (c *fakeGitHubUserClient) GetContent(context.Context, string, string, string, string) (*model.GitHubContent, error) {
+	return nil, errGitHubReadNotUsed
+}
+
 func (c *fakeGitHubUserClient) GetUser(context.Context) (*model.GitHubIdentity, error) {
 	c.users.mu.Lock()
 	defer c.users.mu.Unlock()

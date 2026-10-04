@@ -115,61 +115,10 @@ func (c *fakeUserClient) AuthTest(_ context.Context) (*model.SlackIdentity, erro
 	return id, nil
 }
 
-type botMessage struct {
-	ChannelID string
-	UserID    model.SlackUserID
-	ThreadTS  string
-	Text      string
-}
-
-// fakeBot records every Slack call the bot token would make.
-type fakeBot struct {
-	mu            sync.Mutex
-	names         map[model.SlackUserID]string
-	nameErr       error
-	replyErr      error
-	ephemeralErr  error
-	threadReplies []botMessage
-	ephemerals    []botMessage
-}
-
-func newFakeBot() *fakeBot {
-	return &fakeBot{names: make(map[model.SlackUserID]string)}
-}
-
-func (b *fakeBot) PostThreadReply(_ context.Context, channelID, threadTS, text string) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.threadReplies = append(b.threadReplies, botMessage{ChannelID: channelID, ThreadTS: threadTS, Text: text})
-	return b.replyErr
-}
-
-func (b *fakeBot) PostEphemeral(_ context.Context, channelID string, userID model.SlackUserID, threadTS, text string) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.ephemerals = append(b.ephemerals, botMessage{ChannelID: channelID, UserID: userID, ThreadTS: threadTS, Text: text})
-	return b.ephemeralErr
-}
-
-func (b *fakeBot) GetUserName(_ context.Context, userID model.SlackUserID) (string, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.nameErr != nil {
-		return "", b.nameErr
-	}
-	return b.names[userID], nil
-}
-
-func (b *fakeBot) replies() []botMessage {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return append([]botMessage(nil), b.threadReplies...)
-}
-
-func (b *fakeBot) ephemeralMessages() []botMessage {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return append([]botMessage(nil), b.ephemerals...)
+// SearchMessages is not used by the tests of this package; the agents test
+// the search with their own client.
+func (c *fakeUserClient) SearchMessages(context.Context, string, int) ([]model.SlackMessageHit, error) {
+	return nil, errors.New("search is not used in usecase tests")
 }
 
 var testKey = model.UserKey{TeamID: "T0123ABCD", UserID: "U0123ABCD"}

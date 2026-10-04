@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -15,6 +16,7 @@ import (
 	"github.com/slack-go/slack/slackevents"
 
 	httpctrl "github.com/m-mizutani/robin/pkg/controller/http"
+	"github.com/m-mizutani/robin/pkg/domain/model"
 	"github.com/m-mizutani/robin/pkg/utils/async"
 )
 
@@ -136,6 +138,86 @@ func TestSlackEvent_InvalidJSON(t *testing.T) {
 
 	gt.Number(t, w.Code).Equal(http.StatusBadRequest)
 	gt.Array(t, slackUC.handled()).Length(0)
+}
+
+func signedInteraction(payload string, ts time.Time) *http.Request {
+	body := url.Values{"payload": {payload}}.Encode()
+	timestamp := strconv.FormatInt(ts.Unix(), 10)
+	r := httptest.NewRequest(http.MethodPost, "/hooks/slack/interaction", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	r.Header.Set("X-Slack-Request-Timestamp", timestamp)
+	r.Header.Set("X-Slack-Signature", sign(testSigningSecret, timestamp, body))
+	return r
+}
+
+const messageActionPayload = `{"type":"message_action","callback_id":"robin_delete_message","trigger_id":"1.2.abc",
+"team":{"id":"T0123ABCD","domain":"example"},"channel":{"id":"C0123ABCD","name":"general"},
+"user":{"id":"U0123ABCD","name":"alice"},"message_ts":"1700000300.000100",
+"message":{"type":"message","user":"UROBIN","ts":"1700000300.000100","text":"answer"}}`
+
+func TestSlackInteraction_MessageShortcutIsDispatched(t *testing.T) {
+	slackUC := &fakeSlackEventUseCase{}
+	srv := newTestServer(t, "https://robin.example.com", newFakeAuthUseCase(), slackUC)
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, signedInteraction(messageActionPayload, time.Now()))
+	async.Wait()
+
+	gt.Number(t, w.Code).Equal(http.StatusOK)
+	gt.String(t, w.Body.String()).Equal("")
+	gt.Equal(t, slackUC.handledShortcuts(), []model.SlackMessageShortcut{{
+		TeamID:     "T0123ABCD",
+		CallbackID: "robin_delete_message",
+		ChannelID:  "C0123ABCD",
+		UserID:     "U0123ABCD",
+		MessageTS:  "1700000300.000100",
+	}})
+}
+
+func TestSlackInteraction_Rejected(t *testing.T) {
+	cases := map[string]struct {
+		build func() *http.Request
+		code  int
+	}{
+		"no signature": {code: http.StatusUnauthorized, build: func() *http.Request {
+			body := url.Values{"payload": {messageActionPayload}}.Encode()
+			r := httptest.NewRequest(http.MethodPost, "/hooks/slack/interaction", strings.NewReader(body))
+			r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			return r
+		}},
+		"wrong signature": {code: http.StatusUnauthorized, build: func() *http.Request {
+			r := signedInteraction(messageActionPayload, time.Now())
+			r.Header.Set("X-Slack-Signature", "v0=deadbeef")
+			return r
+		}},
+		"no payload": {code: http.StatusBadRequest, build: func() *http.Request {
+			timestamp := strconv.FormatInt(time.Now().Unix(), 10)
+			r := httptest.NewRequest(http.MethodPost, "/hooks/slack/interaction", strings.NewReader("other=1"))
+			r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			r.Header.Set("X-Slack-Request-Timestamp", timestamp)
+			r.Header.Set("X-Slack-Signature", sign(testSigningSecret, timestamp, "other=1"))
+			return r
+		}},
+		"invalid json": {code: http.StatusBadRequest, build: func() *http.Request {
+			return signedInteraction(`{not json`, time.Now())
+		}},
+		"another interaction type": {code: http.StatusOK, build: func() *http.Request {
+			return signedInteraction(`{"type":"block_actions","team":{"id":"T0123ABCD"},"user":{"id":"U0123ABCD"}}`, time.Now())
+		}},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			slackUC := &fakeSlackEventUseCase{}
+			srv := newTestServer(t, "https://robin.example.com", newFakeAuthUseCase(), slackUC)
+
+			w := httptest.NewRecorder()
+			srv.ServeHTTP(w, tc.build())
+			async.Wait()
+
+			gt.Number(t, w.Code).Equal(tc.code)
+			gt.Array(t, slackUC.handledShortcuts()).Length(0)
+		})
+	}
 }
 
 func TestSlackEvent_BodyTooLarge(t *testing.T) {
