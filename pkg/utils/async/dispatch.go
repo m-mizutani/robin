@@ -59,16 +59,21 @@ func Dispatch(ctx context.Context, handler func(ctx context.Context) error) {
 	begin()
 	go func() {
 		defer end()
-		defer func() {
-			if r := recover(); r != nil {
-				errutil.Handle(bgCtx, goerr.New("panic in async handler", goerr.V("panic", r)), "async handler panicked")
-			}
-		}()
+		run(bgCtx, handler)
+	}()
+}
 
-		if err := handler(bgCtx); err != nil {
-			errutil.Handle(bgCtx, err, "async handler failed")
+// run calls handler and records its error or panic.
+func run(ctx context.Context, handler func(ctx context.Context) error) {
+	defer func() {
+		if r := recover(); r != nil {
+			errutil.Handle(ctx, goerr.New("panic in async handler", goerr.V("panic", r)), "async handler panicked")
 		}
 	}()
+
+	if err := handler(ctx); err != nil {
+		errutil.Handle(ctx, err, "async handler failed")
+	}
 }
 
 // Drain waits until no handler started by Dispatch is running, or until ctx

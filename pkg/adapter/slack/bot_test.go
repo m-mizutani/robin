@@ -346,3 +346,128 @@ func TestBot_GetUserName(t *testing.T) {
 		})
 	}
 }
+
+func TestBot_PostMessage(t *testing.T) {
+	fake := newFakeSlack(t, map[string]string{
+		"/api/chat.postMessage": `{"ok":true,"channel":"C0123","ts":"1700000000.000100"}`,
+	})
+	bot := slack.NewBot("xoxb-test", slackgo.OptionAPIURL(fake.apiURL()))
+
+	ts, err := bot.PostMessage(context.Background(), "C0123", "U0OWNER", "Good morning")
+	gt.NoError(t, err).Required()
+	gt.String(t, ts).Equal("1700000000.000100")
+
+	reqs := fake.recorded()
+	gt.Array(t, reqs).Length(1).Required()
+	gt.String(t, reqs[0].Form.Get("channel")).Equal("C0123")
+	gt.Bool(t, reqs[0].Form.Has("thread_ts")).False()
+	blocks := decodeBlocks(t, reqs[0].Form)
+	gt.Array(t, blocks).Length(1).Required()
+	gt.String(t, blocks[0].BlockID).Equal("robin_answer:U0OWNER")
+	gt.String(t, blocks[0].Text).Equal("Good morning")
+}
+
+func TestBot_PostMessageError(t *testing.T) {
+	fake := newFakeSlack(t, map[string]string{
+		"/api/chat.postMessage": `{"ok":false,"error":"not_in_channel"}`,
+	})
+	bot := slack.NewBot("xoxb-test", slackgo.OptionAPIURL(fake.apiURL()))
+	_, err := bot.PostMessage(context.Background(), "C0123", "U0OWNER", "Good morning")
+	gt.Value(t, err).NotNil()
+}
+
+func TestBot_GetChannel(t *testing.T) {
+	fake := newFakeSlack(t, map[string]string{
+		"/api/conversations.info": `{"ok":true,"channel":{"id":"C0123","name":"general","is_private":true,"is_archived":true}}`,
+	})
+	bot := slack.NewBot("xoxb-test", slackgo.OptionAPIURL(fake.apiURL()))
+
+	ch, err := bot.GetChannel(context.Background(), "C0123")
+	gt.NoError(t, err).Required()
+	gt.Value(t, *ch).Equal(model.SlackChannel{ID: "C0123", Name: "general", IsPrivate: true, IsArchived: true})
+	reqs := fake.recorded()
+	gt.Array(t, reqs).Length(1).Required()
+	gt.String(t, reqs[0].Form.Get("channel")).Equal("C0123")
+
+	missing := newFakeSlack(t, map[string]string{
+		"/api/conversations.info": `{"ok":false,"error":"channel_not_found"}`,
+	})
+	_, err = slack.NewBot("xoxb-test", slackgo.OptionAPIURL(missing.apiURL())).GetChannel(context.Background(), "C0123")
+	gt.Error(t, err).Is(interfaces.ErrSlackChannelNotFound)
+
+	scope := newFakeSlack(t, map[string]string{
+		"/api/conversations.info": `{"ok":false,"error":"missing_scope"}`,
+	})
+	_, err = slack.NewBot("xoxb-test", slackgo.OptionAPIURL(scope.apiURL())).GetChannel(context.Background(), "C0123")
+	gt.Value(t, err).NotNil()
+	gt.Bool(t, errors.Is(err, interfaces.ErrSlackChannelNotFound)).False()
+}
+
+func TestBot_BotUserID(t *testing.T) {
+	fake := newFakeSlack(t, map[string]string{
+		"/api/auth.test": `{"ok":true,"user_id":"U0ROBIN","team_id":"T0123"}`,
+	})
+	id, err := slack.NewBot("xoxb-test", slackgo.OptionAPIURL(fake.apiURL())).BotUserID(context.Background())
+	gt.NoError(t, err).Required()
+	gt.Value(t, id).Equal(model.SlackUserID("U0ROBIN"))
+
+	empty := newFakeSlack(t, map[string]string{"/api/auth.test": `{"ok":true}`})
+	_, err = slack.NewBot("xoxb-test", slackgo.OptionAPIURL(empty.apiURL())).BotUserID(context.Background())
+	gt.Value(t, err).NotNil()
+}
+
+// membersServer answers conversations.members with the pages in order and
+// records the cursors it received.
+func membersServer(t *testing.T, pages []string) (*httptest.Server, func() []string) {
+	t.Helper()
+	var mu sync.Mutex
+	var cursors []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gt.NoError(t, r.ParseForm())
+		mu.Lock()
+		cursors = append(cursors, r.PostForm.Get("cursor"))
+		page := pages[len(cursors)-1]
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(page))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), cursors...)
+	}
+}
+
+func TestBot_ChannelMembers(t *testing.T) {
+	pages := []string{
+		`{"ok":true,"members":["U1","U0ROBIN"],"response_metadata":{"next_cursor":"page2"}}`,
+		`{"ok":true,"members":["U2","U0ALICE"],"response_metadata":{"next_cursor":"page3"}}`,
+		`{"ok":true,"members":["U3"],"response_metadata":{"next_cursor":""}}`,
+	}
+
+	t.Run("stops once every user is found", func(t *testing.T) {
+		srv, cursors := membersServer(t, pages)
+		bot := slack.NewBot("xoxb-test", slackgo.OptionAPIURL(srv.URL+"/api/"))
+		got, err := bot.ChannelMembers(context.Background(), "C0123", []model.SlackUserID{"U0ROBIN", "U0ALICE"})
+		gt.NoError(t, err).Required()
+		gt.Value(t, got).Equal(map[model.SlackUserID]bool{"U0ROBIN": true, "U0ALICE": true})
+		gt.Value(t, cursors()).Equal([]string{"", "page2"})
+	})
+
+	t.Run("reads every page for a user who is not a member", func(t *testing.T) {
+		srv, cursors := membersServer(t, pages)
+		bot := slack.NewBot("xoxb-test", slackgo.OptionAPIURL(srv.URL+"/api/"))
+		got, err := bot.ChannelMembers(context.Background(), "C0123", []model.SlackUserID{"U0ROBIN", "U0BOB"})
+		gt.NoError(t, err).Required()
+		gt.Value(t, got).Equal(map[model.SlackUserID]bool{"U0ROBIN": true, "U0BOB": false})
+		gt.Value(t, cursors()).Equal([]string{"", "page2", "page3"})
+	})
+
+	t.Run("api error", func(t *testing.T) {
+		srv, _ := membersServer(t, []string{`{"ok":false,"error":"channel_not_found"}`})
+		bot := slack.NewBot("xoxb-test", slackgo.OptionAPIURL(srv.URL+"/api/"))
+		_, err := bot.ChannelMembers(context.Background(), "C0123", []model.SlackUserID{"U0ROBIN"})
+		gt.Value(t, err).NotNil()
+	})
+}

@@ -61,6 +61,10 @@ func New(cfg Config, opts ...option.RequestOption) *Client {
 }
 
 func toolParams(specs []model.LLMToolSpec) ([]anthropic.BetaToolUnionParam, error) {
+	// nil leaves "tools" out of the request; an empty slice would send [].
+	if len(specs) == 0 {
+		return nil, nil
+	}
 	tools := make([]anthropic.BetaToolUnionParam, 0, len(specs))
 	for _, spec := range specs {
 		var schema map[string]any

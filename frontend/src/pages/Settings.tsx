@@ -13,6 +13,7 @@ import {
   startLogin,
   startNotionConnect,
 } from '../api'
+import ScheduledMessages from '../components/ScheduledMessages'
 import { useAuth } from '../contexts/auth-context'
 import {
   listIntegrations,
@@ -275,6 +276,7 @@ export default function Settings() {
       <section className="card">
         <h1 className="title">Settings</h1>
         <p className="muted">Signed in as {me.name}</p>
+        <ScheduledMessages />
         <h2>Integrations</h2>
         {notice && (
           <p className={notice.className} role={notice.role}>

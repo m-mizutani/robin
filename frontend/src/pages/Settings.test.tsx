@@ -67,6 +67,9 @@ const githubConnected = githubStatus({ available: true, connected: true, login: 
 
 const githubPath = '/api/v1/integrations/github'
 
+const jobsPath = '/api/v1/jobs'
+const noJobs = '{"available":true,"max_jobs":10,"jobs":[]}'
+
 // Shows the current URL, so tests can check that the result parameter is
 // removed after the notice is shown.
 function CurrentLocation() {
@@ -97,8 +100,17 @@ function renderSettings(path = '/settings') {
 
 type Handler = (url: string, init?: RequestInit) => Promise<Response>
 
+// stubFetch answers every request with handler, except the list of scheduled
+// messages, which is empty: the tests of this file are about the rest of the
+// page, and components/ScheduledMessages.test.tsx covers that section.
 function stubFetch(handler: Handler) {
-  const mock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => handler(String(input), init))
+  const mock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input)
+    if (url === jobsPath && (init?.method ?? 'GET') === 'GET') {
+      return Promise.resolve(new Response(noJobs, { status: 200 }))
+    }
+    return handler(url, init)
+  })
   vi.stubGlobal('fetch', mock)
   return mock
 }
@@ -157,6 +169,17 @@ describe('Settings', () => {
     expect(screen.queryByRole('button', { name: 'Disconnect Slack' })).toBeNull()
   })
 
+  it('shows scheduled messages above the integrations', async () => {
+    stubApi(me(true))
+    renderSettings()
+
+    expect(await screen.findByText('No scheduled messages yet.')).toBeInTheDocument()
+    expect(screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent)).toEqual([
+      'Scheduled messages',
+      'Integrations',
+    ])
+  })
+
   it('offers to connect Slack when the account is not linked', async () => {
     stubApi(me(false))
     renderSettings()
@@ -176,14 +199,16 @@ describe('Settings', () => {
     expect(screen.getByRole('button', { name: 'Redirecting to Slack…' })).toBeDisabled()
   })
 
-  it('fetches the user and the status of each integration once', async () => {
+  it('fetches the user, the scheduled messages and the status of each integration once', async () => {
     const fetchMock = stubApi(me(true))
     renderSettings()
 
     await screen.findByRole('heading', { name: 'Integrations' })
     expect(screen.queryByText('Coming soon')).toBeNull()
-    // /auth/me and the status of Google Workspace, Notion, and GitHub; nothing else.
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4))
+    // /auth/me, the scheduled messages, and the status of Google Workspace,
+    // Notion, and GitHub; nothing else.
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(5))
+    expect(callsTo(fetchMock, jobsPath)).toHaveLength(1)
   })
 
   it('lists the services in display order', async () => {

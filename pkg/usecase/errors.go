@@ -89,4 +89,26 @@ var (
 	// ErrThreadOwnedByOther means another user owns the conversation of the
 	// thread a mention was posted in.
 	ErrThreadOwnedByOther = errors.New("thread is owned by another user")
+
+	// ErrJobInvalidInput means a new job has an unknown kind, a malformed
+	// channel ID, a time out of range, or an unknown time zone.
+	ErrJobInvalidInput = errors.New("invalid job input")
+
+	// ErrJobChannelNotFound means the channel of a new job does not exist or
+	// Robin cannot see it.
+	ErrJobChannelNotFound = errors.New("job channel not found")
+
+	// ErrJobChannelArchived means the channel of a new job is archived.
+	ErrJobChannelArchived = errors.New("job channel is archived")
+
+	// ErrJobRobinNotInChannel means Robin is not a member of the channel of a
+	// new job.
+	ErrJobRobinNotInChannel = errors.New("robin is not in the job channel")
+
+	// ErrJobUserNotInChannel means the user adding a job is not a member of
+	// its channel.
+	ErrJobUserNotInChannel = errors.New("user is not in the job channel")
+
+	// ErrJobLimitReached means the user already has the most jobs allowed.
+	ErrJobLimitReached = errors.New("job limit reached")
 )

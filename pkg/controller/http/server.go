@@ -53,6 +53,12 @@ type gitHubUseCase interface {
 	Disconnect(ctx context.Context, key model.UserKey) error
 }
 
+type jobUseCase interface {
+	List(ctx context.Context, key model.UserKey) (*usecase.JobList, error)
+	Create(ctx context.Context, key model.UserKey, in usecase.JobInput) (*model.Job, error)
+	Delete(ctx context.Context, key model.UserKey, id model.JobID) error
+}
+
 type Config struct {
 	// BaseURL decides the Secure cookie attribute. A TLS-terminating proxy
 	// hides TLS from the request, so the scheme of the public URL is used.
@@ -68,6 +74,7 @@ type Server struct {
 	googleUC     googleWorkspaceUseCase
 	notionUC     notionUseCase
 	githubUC     gitHubUseCase
+	jobUC        jobUseCase
 	secureCookie bool
 }
 
@@ -79,6 +86,15 @@ type options struct {
 	googleUC           googleWorkspaceUseCase
 	notionUC           notionUseCase
 	githubUC           gitHubUseCase
+	jobUC              jobUseCase
+}
+
+// WithJobs mounts POST /api/v1/jobs and DELETE /api/v1/jobs/{jobID}. Without
+// it, GET /api/v1/jobs reports the feature as unavailable.
+func WithJobs(uc jobUseCase) Option {
+	return func(o *options) {
+		o.jobUC = uc
+	}
 }
 
 // WithNotion mounts the connect, callback, and disconnect endpoints of the
@@ -147,6 +163,7 @@ func New(authUC authUseCase, cfg Config, opts ...Option) (*Server, error) {
 		googleUC:     o.googleUC,
 		notionUC:     o.notionUC,
 		githubUC:     o.githubUC,
+		jobUC:        o.jobUC,
 		secureCookie: base.Scheme == "https",
 	}
 
@@ -191,6 +208,15 @@ func New(authUC authUseCase, cfg Config, opts ...Option) (*Server, error) {
 			r.With(requireSession(authUC)).Post("/disconnect", s.githubDisconnectHandler)
 		}
 		r.NotFound(apiNotFound)
+	})
+	r.Route(jobsPath, func(r chi.Router) {
+		r.With(requireSession(authUC)).Get("/", s.jobsListHandler)
+		if s.jobUC != nil {
+			r.With(requireSession(authUC)).Post("/", s.jobsCreateHandler)
+			r.With(requireSession(authUC)).Delete("/{jobID}", s.jobsDeleteHandler)
+		}
+		r.NotFound(apiNotFound)
+		r.MethodNotAllowed(apiNotFound)
 	})
 	r.HandleFunc("/api/*", apiNotFound)
 

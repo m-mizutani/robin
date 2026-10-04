@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/m-mizutani/robin/pkg/domain/interfaces"
@@ -46,16 +47,30 @@ type SlackBot struct {
 	ThreadErr    error // GetThreadMessages
 	GetErr       error // GetMessage
 	DeleteErr    error // DeleteMessage
+	ChannelErr   error // GetChannel
+	BotIDErr     error // BotUserID
+	MembersErr   error // ChannelMembers
+	MessageErr   error // PostMessage
 	Thread       []model.SlackThreadMessage
 	Message      *model.SlackPostedMessage
-	nextTS       int
-	calls        []SlackCall
+	// Channels and Members are what GetChannel and ChannelMembers read; a
+	// channel missing from Channels is not found.
+	Channels map[string]*model.SlackChannel
+	Members  map[string][]model.SlackUserID
+	BotID    model.SlackUserID
+	nextTS   int
+	calls    []SlackCall
 }
 
 var _ interfaces.SlackBot = &SlackBot{}
 
 func NewSlackBot() *SlackBot {
-	return &SlackBot{Names: make(map[model.SlackUserID]string)}
+	return &SlackBot{
+		Names:    make(map[model.SlackUserID]string),
+		Channels: make(map[string]*model.SlackChannel),
+		Members:  make(map[string][]model.SlackUserID),
+		BotID:    "U0ROBIN",
+	}
 }
 
 func (b *SlackBot) record(c SlackCall) {
@@ -134,6 +149,63 @@ func (b *SlackBot) DeleteMessage(_ context.Context, channelID, ts string) error 
 	defer b.mu.Unlock()
 	b.record(SlackCall{Method: "DeleteMessage", ChannelID: channelID, TS: ts})
 	return b.DeleteErr
+}
+
+func (b *SlackBot) GetChannel(_ context.Context, channelID string) (*model.SlackChannel, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.record(SlackCall{Method: "GetChannel", ChannelID: channelID})
+	if b.ChannelErr != nil {
+		return nil, b.ChannelErr
+	}
+	ch, ok := b.Channels[channelID]
+	if !ok {
+		return nil, interfaces.ErrSlackChannelNotFound
+	}
+	out := *ch
+	return &out, nil
+}
+
+func (b *SlackBot) BotUserID(_ context.Context) (model.SlackUserID, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.record(SlackCall{Method: "BotUserID"})
+	if b.BotIDErr != nil {
+		return "", b.BotIDErr
+	}
+	return b.BotID, nil
+}
+
+// ChannelMembers records the users asked about in Text, joined by ",".
+func (b *SlackBot) ChannelMembers(_ context.Context, channelID string, users []model.SlackUserID) (map[model.SlackUserID]bool, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	names := make([]string, 0, len(users))
+	for _, u := range users {
+		names = append(names, string(u))
+	}
+	b.record(SlackCall{Method: "ChannelMembers", ChannelID: channelID, Text: strings.Join(names, ",")})
+	if b.MembersErr != nil {
+		return nil, b.MembersErr
+	}
+	out := make(map[model.SlackUserID]bool, len(users))
+	for _, u := range users {
+		out[u] = slices.Contains(b.Members[channelID], u)
+	}
+	return out, nil
+}
+
+// PostMessage returns ts "1900000000.000001", "...002" and so on.
+func (b *SlackBot) PostMessage(_ context.Context, channelID string, requester model.SlackUserID, markdown string) (string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.nextTS++
+	ts := fmt.Sprintf("1900000000.%06d", b.nextTS)
+	b.record(SlackCall{Method: "PostMessage", ChannelID: channelID, Requester: requester, TS: ts, Text: markdown})
+	if b.MessageErr != nil {
+		return "", b.MessageErr
+	}
+	return ts, nil
 }
 
 // Recorded returns the calls of the given methods, or every call.

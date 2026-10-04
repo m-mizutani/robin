@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/m-mizutani/gt"
 
 	"github.com/m-mizutani/robin/pkg/cli/config"
@@ -22,21 +23,21 @@ func parseLLM(t *testing.T, args ...string) *config.LLM {
 
 func TestLLM_Validate(t *testing.T) {
 	cases := map[string]struct {
-		args    []string
-		events  bool
-		wantErr bool
+		args     []string
+		required bool
+		wantErr  bool
 	}{
-		"vertex with events":       {args: []string{"--llm-vertex-project-id", "my-project"}, events: true},
-		"api key with events":      {args: []string{"--anthropic-api-key", "sk-ant-secret"}, events: true},
-		"both with events":         {args: []string{"--llm-vertex-project-id", "p", "--anthropic-api-key", "sk-ant-secret"}, events: true, wantErr: true},
-		"neither with events":      {events: true, wantErr: true},
-		"neither without events":   {events: false},
-		"both without events":      {args: []string{"--llm-vertex-project-id", "p", "--anthropic-api-key", "sk-ant-secret"}, wantErr: true},
-		"vertex with empty region": {args: []string{"--llm-vertex-project-id", "p", "--llm-vertex-region", ""}, events: true, wantErr: true},
+		"vertex when required":     {args: []string{"--llm-vertex-project-id", "my-project"}, required: true},
+		"api key when required":    {args: []string{"--anthropic-api-key", "sk-ant-secret"}, required: true},
+		"both when required":       {args: []string{"--llm-vertex-project-id", "p", "--anthropic-api-key", "sk-ant-secret"}, required: true, wantErr: true},
+		"neither when required":    {required: true, wantErr: true},
+		"neither when optional":    {required: false},
+		"both when optional":       {args: []string{"--llm-vertex-project-id", "p", "--anthropic-api-key", "sk-ant-secret"}, wantErr: true},
+		"vertex with empty region": {args: []string{"--llm-vertex-project-id", "p", "--llm-vertex-region", ""}, required: true, wantErr: true},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			err := parseLLM(t, tc.args...).Validate(tc.events)
+			err := parseLLM(t, tc.args...).Validate(tc.required)
 			if !tc.wantErr {
 				gt.NoError(t, err)
 				return
@@ -51,6 +52,16 @@ func TestLLM_ConfigureAPIKey(t *testing.T) {
 	opts, err := parseLLM(t, "--anthropic-api-key", "sk-ant-secret").Configure(context.Background())
 	gt.NoError(t, err).Required()
 	gt.Array(t, opts).Length(1)
+}
+
+func TestLLM_NewClient(t *testing.T) {
+	x := parseLLM(t, "--anthropic-api-key", "sk-ant-secret")
+	c, err := x.NewClient(context.Background(), "claude-sonnet-5-5", 2048, anthropic.BetaOutputConfigEffortLow)
+	gt.NoError(t, err).Required()
+	gt.Value(t, c).NotNil()
+
+	_, err = x.NewClient(context.Background(), "", 2048, anthropic.BetaOutputConfigEffortLow)
+	gt.Error(t, err)
 }
 
 func TestLLM_ConfigureVertex(t *testing.T) {

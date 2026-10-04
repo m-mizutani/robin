@@ -166,6 +166,19 @@ func TestSession_Request(t *testing.T) {
 	gt.Value(t, msgs[4].(map[string]any)["role"]).Equal("system")
 }
 
+func TestSession_RequestWithoutTools(t *testing.T) {
+	f := newFakeClaude(t, fakeResponse{status: 200, body: endTurnResponse})
+	s, err := f.client().NewSession(model.LLMSessionConfig{SystemPrompt: "You are Robin."}, nil)
+	gt.NoError(t, err).Required()
+	_, err = s.Send(context.Background(), model.LLMInput{UserText: "say hello"})
+	gt.NoError(t, err).Required()
+
+	body := f.recorded()[0].body
+	_, hasTools := body["tools"]
+	gt.False(t, hasTools)
+	gt.Value(t, body["tool_choice"]).Nil()
+}
+
 func TestSession_StopReasons(t *testing.T) {
 	cases := map[string]model.LLMStopReason{
 		"end_turn":      model.LLMStopEndTurn,

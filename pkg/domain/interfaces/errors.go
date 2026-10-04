@@ -68,6 +68,14 @@ var (
 	// or Robin cannot read it.
 	ErrSlackMessageNotFound = errors.New("slack message not found")
 
+	// ErrSlackChannelNotFound is returned when a channel does not exist or
+	// Robin cannot see it.
+	ErrSlackChannelNotFound = errors.New("slack channel not found")
+
+	// ErrJobLimitReached is returned by a repository when the user already has
+	// the most jobs allowed.
+	ErrJobLimitReached = errors.New("job limit reached")
+
 	// ErrLLMHistoryIncompatible means the stored conversation was written by
 	// another provider or format version and cannot be continued.
 	ErrLLMHistoryIncompatible = errors.New("llm history format is not supported by this client")

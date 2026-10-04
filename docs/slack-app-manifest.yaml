@@ -37,6 +37,11 @@ oauth_config:
       - mpim:history
       # Read the display name of a user who signs in (users.info).
       - users:read
+      # Check the channel of a scheduled message, its archived state and its
+      # members, in public and private channels (conversations.info,
+      # conversations.members).
+      - channels:read
+      - groups:read
     user:
       # Requested from each user at sign-in; used to search messages on the
       # user's behalf (search.messages accepts only user tokens).

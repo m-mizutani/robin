@@ -43,12 +43,44 @@ own tokens.
   not post, Robin only explains that it cannot delete it. Deleting a message
   does not change the stored conversation.
 
+## How Robin posts scheduled messages
+
+On the settings page, under **Scheduled messages**, each user can ask Robin to
+post a short greeting written by Claude to a Slack channel every day at a time
+and in a time zone they choose. Each of these is a *job*.
+
+- **Adding a job.** The user enters the channel ID (shown at the bottom of the
+  channel details in Slack), the time and the time zone. Robin adds the job
+  only when the channel exists, is not archived, and has both Robin and the
+  user as members. A user can have up to 10 jobs and sees and deletes only
+  their own.
+- **Running jobs.** `robin schedule` ([section 9](#9-run-the-scheduler)) runs
+  every job whose time has come, once, and exits. Run it every few minutes,
+  for example every 5 minutes; a greeting is posted at the first run of the
+  command after its time. When the command does not run within one hour of a
+  job's time (`--max-delay`), that day's greeting is skipped, and days the
+  command did not run at all are not made up.
+- **Once per day at most.** Several `robin schedule` processes may run at the
+  same time: each day's greeting of a job is started by one of them only,
+  decided in a Firestore transaction. A greeting whose process stops while it
+  is being written is not retried, so it is posted at most once.
+- **The greeting.** Claude writes one or two sentences in English with the
+  model and prices of `[llm]` ([section 7](#7-set-up-claude)), in one call with
+  a limit of 2,048 output tokens, and Robin posts it to the channel. The user
+  who added the job can delete the message with **Delete Robin message**.
+- **Results.** The settings page shows each job's next post and how the last
+  one ended: posted, failed, or skipped. When the result of a post was not
+  recorded (the process stopped, or the result could not be saved), the page
+  says so and asks the user to check the channel. Robin keeps the record
+  of each run, including its cost, for 30 days.
+
 ## How Robin uses Slack
 
 - **Bot token** (`xoxb-`): installed once by a workspace administrator. Robin
   uses it to receive mentions, read the thread of a mention, post, update and
-  delete its own messages in threads, send login prompts, and read the display
-  name of a user who signs in.
+  delete its own messages in threads, send login prompts, read the display
+  name of a user who signs in, and, when a user adds a scheduled message,
+  check the channel and its members and later post to it.
 - **User tokens** (`xoxp-`): obtained from each user when they sign in on the
   web page. The sign-in is a Slack OAuth v2 authorization that requests the user
   scope `search:read`, so one authorization both identifies the user and
@@ -217,14 +249,18 @@ organization that uses Robin.
 7. The event request URL is verified by Slack only when the server is running.
    Start the server ([section 8](#8-run-the-server)) and re-verify the URL on **Event Subscriptions** if
    Slack reported it as unverified.
-8. Invite the bot to the channels where it should answer (`/invite @robin`).
+8. Invite the bot to the channels where it should answer or post scheduled
+   messages (`/invite @robin`).
 
 An app created from an older manifest lacks the bot scopes `channels:history`,
 `groups:history` and `mpim:history` (Robin reads the thread of a mention with
-them), the **Delete Robin message** shortcut and the interactivity request
-URL. Update the app's manifest on **App Manifest** with the current file, then
-reinstall the app on **Install App** so the new scopes take effect. Without
-the history scopes, every answer fails when Robin reads the thread.
+them), `channels:read` and `groups:read` (Robin checks the channel of a
+scheduled message with them), the **Delete Robin message** shortcut and the
+interactivity request URL. Update the app's manifest on **App Manifest** with
+the current file, then reinstall the app on **Install App** so the new scopes
+take effect. Without the history scopes, every answer fails when Robin reads
+the thread; without `channels:read` and `groups:read`, adding a scheduled
+message fails.
 
 Keep **Token Rotation** disabled (the manifest sets
 `token_rotation_enabled: false`). Slack does not allow turning it off once it is
@@ -279,6 +315,7 @@ restored.
    gcloud firestore fields ttls update ExpiresAt --collection-group=agentSessions --enable-ttl --project=$PROJECT_ID
    gcloud firestore fields ttls update ExpiresAt --collection-group=agentSessionMessages --enable-ttl --project=$PROJECT_ID
    gcloud firestore fields ttls update ExpiresAt --collection-group=agentThreads --enable-ttl --project=$PROJECT_ID
+   gcloud firestore fields ttls update ExpiresAt --collection-group=jobRuns --enable-ttl --project=$PROJECT_ID
    ```
 
    TTL deletion runs some time after the expiry; Robin also checks the expiry
@@ -299,15 +336,20 @@ No composite index is needed. Documents are laid out as follows:
 | `teams/{TeamID}/users/{UserID}/agentSessions/{AgentSessionID}` | Conversation of one Slack thread with the user who started it: the channel and thread, the number of stored messages, the last answered mention, the lease of a running answer, and the expiry. `AgentSessionID` is `{TeamID}-{ChannelID}-{thread ts without the dot}` |
 | `teams/{TeamID}/users/{UserID}/agentSessions/{AgentSessionID}/agentSessionMessages/{Generation}-{Seq}` | One message of the conversation (the request, Robin's notes to the model, the model's response and tool results) in the format of the model's API |
 | `agentThreads/{AgentSessionID}` | The only Robin user who owns the conversation of a thread. Written together with the conversation above |
+| `teams/{TeamID}/users/{UserID}/jobs/{JobID}` | One scheduled message of the user: its kind, the channel (ID and name at the time it was added), the time and time zone, the next run, and how the last run ended |
+| `teams/{TeamID}/users/{UserID}/jobs/{JobID}/jobRuns/{RunID}` | One run of the job (`RunID` is its scheduled time in UTC, such as `20261005T000000Z`): when it started and ended, its result, the posted message, and its cost (kept 30 days) |
+| `schedules/{JobID}` | The owner and the next run time of a job, read by `robin schedule` to find jobs whose time has come. Written and deleted together with the job above |
 | `sessions/{SessionID}` | Web session (hash of the session secret, owner, expiry) |
 | `slackEvents/{EventID}` | Record of a processed Slack event, used to drop redelivered events (kept 24 hours) |
 
 Everything that belongs to a user is stored under that user's document path.
-`googleWorkspaceAccounts`, `notionAccounts`, `githubAccounts`, and
-`agentThreads` are the exceptions: they are looked up by the Google account,
-the Notion user, the GitHub account, or the Slack thread to keep one account
-from being connected to two users and one thread from being answered for two
-users, and they hold only the owner's Slack IDs.
+`googleWorkspaceAccounts`, `notionAccounts`, `githubAccounts`, `agentThreads`,
+and `schedules` are the exceptions: they are looked up by the Google account,
+the Notion user, the GitHub account, the Slack thread, or the time of a job, to
+keep one account from being connected to two users, to keep one thread from
+being answered for two users, and to let `robin schedule` find the jobs of
+every user whose time has come. They hold only the owner's Slack IDs (and, for
+`schedules`, the job ID and its next run time).
 
 A conversation and its messages expire 30 days after the conversation started
 (`[agent] session_ttl`). The conversation stores what the model read, including
@@ -438,9 +480,10 @@ or an app manager of it.
 
 ## 7. Set up Claude
 
-Robin answers mentions with Claude, through Vertex AI or the Claude API. It is
-needed whenever Slack events are enabled (the bot token and the signing
-secret are set); set exactly one of the two options below.
+Robin answers mentions and writes scheduled messages with Claude, through
+Vertex AI or the Claude API. `robin serve` needs it whenever Slack events are
+enabled (the bot token and the signing secret are set), and `robin schedule`
+always needs it; set exactly one of the two options below.
 
 - **Vertex AI**: in the Google Cloud project that runs Robin, enable the
   Vertex AI API, enable the Claude model (Claude Sonnet 5.5 by default) in
@@ -506,6 +549,7 @@ robin serve
 | `--slack-signing-secret` | `ROBIN_SLACK_SIGNING_SECRET` | | yes (with `--no-auth`: together with the bot token, or neither) | Signing secret, used to verify Events API requests |
 | `--slack-bot-token` | `ROBIN_SLACK_BOT_TOKEN` | | yes (with `--no-auth`: together with the signing secret, or neither) | Bot user OAuth token (`xoxb-`) |
 | `--slack-team-id` | `ROBIN_SLACK_TEAM_ID` | | yes | The only workspace Robin accepts sign-ins and events from |
+| `--slack-api-url` | `ROBIN_SLACK_API_URL` | `https://slack.com/api/` | | Development and E2E only. Base URL of the Slack Web API the bot calls; any other value is accepted only with `--no-auth` |
 | `--llm-vertex-project-id` | `ROBIN_LLM_VERTEX_PROJECT_ID` | | one of this and `--anthropic-api-key` when Slack events are enabled | Google Cloud project to call Claude through Vertex AI (step 7) |
 | `--llm-vertex-region` | `ROBIN_LLM_VERTEX_REGION` | `global` | | Vertex AI region of Claude |
 | `--anthropic-api-key` | `ROBIN_ANTHROPIC_API_KEY` | | one of this and `--llm-vertex-project-id` when Slack events are enabled | API key to call the Claude API directly |
@@ -546,6 +590,48 @@ Google Cloud credentials are read from Application Default Credentials.
 - Put TLS in front of the server and use an `https` base URL, so the session
   cookies carry the `Secure` attribute.
 
+## 9. Run the scheduler
+
+```sh
+robin schedule
+```
+
+`robin schedule` posts the scheduled messages whose time has come and exits
+([How Robin posts scheduled messages](#how-robin-posts-scheduled-messages)).
+Start it every few minutes with a scheduler of your choice, with the same
+Firestore, Slack bot token, Claude settings, and settings file as `robin
+serve`; for example a Cloud Run job started by Cloud Scheduler, or cron:
+
+```cron
+*/5 * * * * robin schedule
+```
+
+It takes these flags and no others; the shared ones mean the same as for
+`robin serve` (section 8):
+
+| Flag | Environment variable | Default | Required | Description |
+| --- | --- | --- | --- | --- |
+| `--config` | `ROBIN_CONFIG` | | | Settings file (step 7). The model and prices of `[llm]` are used for the greeting |
+| `--repository-backend` | `ROBIN_REPOSITORY_BACKEND` | `firestore` | | Only `firestore`: the in-memory repository of this process holds no jobs |
+| `--firestore-project-id` | `ROBIN_FIRESTORE_PROJECT_ID` | | yes | Google Cloud project of Firestore |
+| `--firestore-database-id` | `ROBIN_FIRESTORE_DATABASE_ID` | `(default)` | | Firestore database ID |
+| `--slack-bot-token` | `ROBIN_SLACK_BOT_TOKEN` | | yes | Bot user OAuth token, used to post the messages |
+| `--slack-api-url` | `ROBIN_SLACK_API_URL` | `https://slack.com/api/` | | Must stay at the default |
+| `--llm-vertex-project-id` | `ROBIN_LLM_VERTEX_PROJECT_ID` | | one of this and `--anthropic-api-key` | Vertex AI project of Claude |
+| `--llm-vertex-region` | `ROBIN_LLM_VERTEX_REGION` | `global` | | Vertex AI region of Claude |
+| `--anthropic-api-key` | `ROBIN_ANTHROPIC_API_KEY` | | one of this and `--llm-vertex-project-id` | API key of the Claude API |
+| `--max-delay` | `ROBIN_SCHEDULE_MAX_DELAY` | `1h` | | A message is skipped when the command runs this long or longer after its time |
+| `--concurrency` | `ROBIN_SCHEDULE_CONCURRENCY` | `4` | | Number of messages written and posted at the same time |
+
+The service account needs `roles/datastore.user` and, with Vertex AI,
+`roles/aiplatform.user`; it does not use Cloud KMS. One message is written
+within 2 minutes; the command exits once every message it started has ended.
+On SIGINT or SIGTERM it starts no more messages, waits for those it started,
+and exits with a non-zero status. It also exits with a non-zero status when
+it cannot read the jobs from Firestore. Each run is logged with its result
+and cost (`job run finished`), and the command ends with the counts
+(`scheduled jobs finished`).
+
 ## Local development
 
 - Backend with Slack: `robin serve --repository-backend memory ...` with the
@@ -570,6 +656,11 @@ Google Cloud credentials are read from Application Default Credentials.
   goes to the real GitHub authorization, and the callback URL of the app must
   match `--base-url`. Without `--kms-key-name` the tokens are encrypted with
   the temporary key described above.
+- Scheduled messages in local development: `robin schedule` reads the jobs
+  from Firestore, so it cannot run against a `--repository-backend memory`
+  server. Run both commands against the Firestore emulator
+  (`FIRESTORE_EMULATOR_HOST=127.0.0.1:28615`, started as in
+  `task test:firestore`) with the same `--firestore-project-id`.
 - Frontend: `task dev:frontend` starts Vite on port 5173 and forwards `/api` to
   `http://localhost:8080`.
 - Build the frontend before building the binary: `task build:frontend`. The
@@ -587,8 +678,9 @@ Google Cloud credentials are read from Application Default Credentials.
 - Frontend: `pnpm test`, `pnpm lint`, and `pnpm build` in `frontend/`.
 - E2E: `task e2e` builds the binary and runs the Playwright tests in
   `frontend/e2e/tests/` against it, started with `--no-auth` and the in-memory
-  repository. Notion is served by `frontend/e2e/fake-notion.mjs`, which
-  Playwright starts together with the server. Install the browser once with
+  repository. Notion is served by `frontend/e2e/fake-notion.mjs` and the Slack
+  Web API of the bot by `frontend/e2e/fake-slack.mjs`, which Playwright starts
+  together with the server. Install the browser once with
   `pnpm exec playwright install chromium` in `frontend/`.
 - Screenshots for pull requests: `task screenshots` captures every screen state
   into `frontend/screenshots/`. Attach them to the PR description with

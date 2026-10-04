@@ -34,32 +34,24 @@ func TestNoAuth(t *testing.T) {
 	})
 }
 
-func TestSlack_ValidateForNoAuth(t *testing.T) {
+func TestSlackApp_ValidateForNoAuth(t *testing.T) {
 	clearSlackEnv(t)
 
 	t.Run("team ID only", func(t *testing.T) {
-		var s config.Slack
+		var s config.SlackApp
 		parse(t, s.Flags(), "--slack-team-id", "T0123ABCD")
 		gt.NoError(t, s.ValidateForNoAuth())
-		gt.Bool(t, s.EventsEnabled()).False()
-	})
-
-	t.Run("with bot token and signing secret", func(t *testing.T) {
-		var s config.Slack
-		parse(t, s.Flags(), "--slack-team-id", "T0123ABCD", "--slack-bot-token", "xoxb-x", "--slack-signing-secret", "s")
-		gt.NoError(t, s.ValidateForNoAuth())
-		gt.Bool(t, s.EventsEnabled()).True()
 	})
 
 	t.Run("missing team ID", func(t *testing.T) {
-		var s config.Slack
+		var s config.SlackApp
 		parse(t, s.Flags())
 		gt.Error(t, s.ValidateForNoAuth())
 	})
 
-	t.Run("bot token without signing secret", func(t *testing.T) {
-		var s config.Slack
-		parse(t, s.Flags(), "--slack-team-id", "T0123ABCD", "--slack-bot-token", "xoxb-x")
+	t.Run("invalid team ID", func(t *testing.T) {
+		var s config.SlackApp
+		parse(t, s.Flags(), "--slack-team-id", "U0123ABCD")
 		gt.Error(t, s.ValidateForNoAuth())
 	})
 }

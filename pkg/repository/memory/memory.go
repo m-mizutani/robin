@@ -16,6 +16,7 @@ type Memory struct {
 	session                   *sessionRepository
 	slackEvent                *slackEventRepository
 	agentSession              *agentSessionRepository
+	job                       *jobRepository
 }
 
 var _ interfaces.Repository = &Memory{}
@@ -30,8 +31,11 @@ func New() *Memory {
 		session:                   newSessionRepository(),
 		slackEvent:                newSlackEventRepository(),
 		agentSession:              newAgentSessionRepository(),
+		job:                       newJobRepository(),
 	}
 }
+
+func (m *Memory) Job() interfaces.JobRepository { return m.job }
 
 func (m *Memory) User() interfaces.UserRepository                       { return m.user }
 func (m *Memory) SlackCredential() interfaces.SlackCredentialRepository { return m.slackCredential }

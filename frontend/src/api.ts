@@ -132,3 +132,95 @@ export async function disconnectGitHub(): Promise<void> {
 export function startGitHubConnect(): void {
   window.location.assign(`${githubPath}/connect`)
 }
+
+export type JobKind = 'hello'
+
+export type JobLastRun = {
+  status: 'running' | 'succeeded' | 'failed' | 'skipped'
+  // why the run failed; empty unless status is "failed"
+  failure: '' | 'no_runner' | 'run_failed' | 'timed_out'
+  scheduled_at: string
+  // when a running run gives up; null for a run that was not started
+  deadline: string | null
+  finished_at: string | null
+}
+
+export type Job = {
+  id: string
+  kind: JobKind
+  channel_id: string
+  channel_name: string
+  hour: number
+  minute: number
+  time_zone: string
+  next_run_at: string
+  last_run: JobLastRun | null
+}
+
+export type JobsStatus = {
+  // false when the server has no Slack bot token configured
+  available: boolean
+  max_jobs: number
+  jobs: Job[]
+}
+
+export type JobInput = {
+  kind: JobKind
+  channel_id: string
+  hour: number
+  minute: number
+  time_zone: string
+}
+
+// Reasons the server gives for not adding a job.
+export const jobErrorCodes = [
+  'invalid_input',
+  'channel_not_found',
+  'channel_archived',
+  'robin_not_in_channel',
+  'user_not_in_channel',
+  'job_limit_reached',
+] as const
+export type JobErrorCode = (typeof jobErrorCodes)[number]
+
+export type CreateJobResult = { kind: 'created'; job: Job } | { kind: 'rejected'; code: JobErrorCode }
+
+const jobsPath = `${apiV1}/jobs`
+
+// Throws when the request fails or the response is not 2xx.
+export async function fetchJobs(): Promise<JobsStatus> {
+  const res = await fetch(jobsPath, { credentials: 'include' })
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status}`)
+  }
+  return (await res.json()) as JobsStatus
+}
+
+// Returns the reason when the server rejects the job, and throws for any other
+// failure.
+export async function createJob(input: JobInput): Promise<CreateJobResult> {
+  const res = await fetch(jobsPath, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+  if (res.ok) {
+    return { kind: 'created', job: (await res.json()) as Job }
+  }
+  if (res.status === 400 || res.status === 409) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string }
+    const code = jobErrorCodes.find((c) => c === body.error)
+    if (code) {
+      return { kind: 'rejected', code }
+    }
+  }
+  throw new Error(`HTTP ${res.status}`)
+}
+
+export async function deleteJob(id: string): Promise<void> {
+  const res = await fetch(`${jobsPath}/${encodeURIComponent(id)}`, { method: 'DELETE', credentials: 'include' })
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status}`)
+  }
+}

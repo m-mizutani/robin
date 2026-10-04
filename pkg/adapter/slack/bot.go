@@ -30,6 +30,7 @@ const (
 	// show.
 	notificationChars = 3000
 	repliesPageSize   = 200
+	membersPageSize   = 200
 )
 
 // notFoundErrors are the Slack error codes that mean the message cannot be
@@ -115,18 +116,95 @@ func (b *Bot) UpdateProgress(ctx context.Context, channelID, messageTS string, r
 }
 
 func (b *Bot) PostAnswer(ctx context.Context, channelID, threadTS string, requester model.SlackUserID, markdown string) error {
+	_, err := b.postAnswer(ctx, channelID, threadTS, requester, markdown)
+	return err
+}
+
+func (b *Bot) PostMessage(ctx context.Context, channelID string, requester model.SlackUserID, markdown string) (string, error) {
+	return b.postAnswer(ctx, channelID, "", requester, markdown)
+}
+
+// postAnswer posts markdown in parts and returns the ts of the first part. An
+// empty threadTS posts to the channel itself.
+func (b *Bot) postAnswer(ctx context.Context, channelID, threadTS string, requester model.SlackUserID, markdown string) (string, error) {
+	first := ""
 	for i, chunk := range splitAnswer(markdown, answerChunkChars) {
-		_, _, err := b.client.PostMessageContext(ctx, channelID,
+		opts := []slack.MsgOption{
 			slack.MsgOptionText(truncateRunes(chunk, notificationChars), false),
 			slack.MsgOptionBlocks(slack.NewMarkdownBlock(answerBlockPrefix+string(requester), chunk)),
-			slack.MsgOptionTS(threadTS),
-		)
+		}
+		if threadTS != "" {
+			opts = append(opts, slack.MsgOptionTS(threadTS))
+		}
+		_, ts, err := b.client.PostMessageContext(ctx, channelID, opts...)
 		if err != nil {
-			return wrapError(err, "failed to post answer",
+			return first, wrapError(err, "failed to post answer",
 				goerr.V("channel_id", channelID), goerr.V("thread_ts", threadTS), goerr.V("part", i))
 		}
+		if first == "" {
+			first = ts
+		}
 	}
-	return nil
+	return first, nil
+}
+
+func (b *Bot) GetChannel(ctx context.Context, channelID string) (*model.SlackChannel, error) {
+	ch, err := b.client.GetConversationInfoContext(ctx, &slack.GetConversationInfoInput{ChannelID: channelID})
+	if err != nil {
+		var slackErr slack.SlackErrorResponse
+		if errors.As(err, &slackErr) && slackErr.Err == "channel_not_found" {
+			return nil, goerr.Wrap(interfaces.ErrSlackChannelNotFound, "slack channel not found", goerr.V("channel_id", channelID))
+		}
+		return nil, wrapError(err, "failed to read slack channel", goerr.V("channel_id", channelID))
+	}
+	return &model.SlackChannel{
+		ID:         ch.ID,
+		Name:       ch.Name,
+		IsPrivate:  ch.IsPrivate,
+		IsArchived: ch.IsArchived,
+	}, nil
+}
+
+func (b *Bot) BotUserID(ctx context.Context) (model.SlackUserID, error) {
+	res, err := b.client.AuthTestContext(ctx)
+	if err != nil {
+		return "", wrapError(err, "failed to identify the bot")
+	}
+	if res.UserID == "" {
+		return "", goerr.New("auth.test returned no bot user ID")
+	}
+	return model.SlackUserID(res.UserID), nil
+}
+
+func (b *Bot) ChannelMembers(ctx context.Context, channelID string, users []model.SlackUserID) (map[model.SlackUserID]bool, error) {
+	found := make(map[model.SlackUserID]bool, len(users))
+	for _, u := range users {
+		found[u] = false
+	}
+	remaining := len(found)
+	cursor := ""
+	for remaining > 0 {
+		members, next, err := b.client.GetUsersInConversationContext(ctx, &slack.GetUsersInConversationParameters{
+			ChannelID: channelID,
+			Cursor:    cursor,
+			Limit:     membersPageSize,
+		})
+		if err != nil {
+			return nil, wrapError(err, "failed to read slack channel members", goerr.V("channel_id", channelID))
+		}
+		for _, m := range members {
+			id := model.SlackUserID(m)
+			if seen, ok := found[id]; ok && !seen {
+				found[id] = true
+				remaining--
+			}
+		}
+		if next == "" {
+			break
+		}
+		cursor = next
+	}
+	return found, nil
 }
 
 // splitAnswer splits text into parts of at most limit characters, at line

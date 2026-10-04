@@ -7,7 +7,11 @@ GraphQL.
 
 ## Layers
 
-- `pkg/cli/` — flags, environment variables, dependency wiring, the `serve` command.
+- `pkg/cli/` — flags, environment variables, dependency wiring, the `serve`
+  and `schedule` commands. Each flag is defined once in a flag group of
+  `pkg/cli/config` (`SlackApp`, `SlackBot`, `LLM`, `Scheduler`, ...), and a
+  command takes the groups it needs; clients built from flags (the bot, the
+  Claude client) come from methods of those groups.
 - `pkg/controller/http/` — routing, cookies, Slack signature verification, JSON
   responses, SPA serving. Parses input and calls a usecase; no business logic,
   no repository or external API calls.
@@ -19,10 +23,16 @@ GraphQL.
   `GitHubUserAccess` is the only one for GitHub user and refresh tokens (it
   refreshes them before they expire, one instance at a time through a lease).
 - `pkg/usecase/agents/{name}/` — one package per LLM agent (`mention` answers
-  Slack mentions). An agent imports `pkg/usecase` and reads the integrations
-  through narrow interfaces it defines, which the Access components satisfy;
-  `pkg/usecase` never imports an agent and calls it through an interface it
-  defines (`MentionAgent`). `pkg/cli` wires them.
+  Slack mentions, `hello` posts the scheduled greeting). An agent imports
+  `pkg/usecase` and reads the integrations through narrow interfaces it
+  defines, which the Access components satisfy; `pkg/usecase` never imports an
+  agent and calls it through an interface it defines (`MentionAgent`,
+  `JobRunner`). `pkg/cli` wires them.
+- Scheduled jobs: `usecase.Scheduler.RunDue` finds, claims and runs due jobs.
+  A trigger (the `schedule` command now, possibly an HTTP handler later) only
+  calls `RunDue` and reports its result; it makes no claim or run decision.
+  Each job kind has one `usecase.JobRunner`, built in
+  `pkg/cli/job_runner.go` for every trigger; a runner need not be an agent.
 - `pkg/usecase/usecasetest/` — test doubles of domain interfaces (Slack bot,
   LLM) shared by the tests of `pkg/usecase` and the agents. Imported only by
   tests.
@@ -57,6 +67,10 @@ Slack Events API handlers acknowledge within three seconds and run the rest in
   `agentThreads/{AgentSessionID}` records the only user whose agent
   conversation a Slack thread holds; it is written in the same transaction as
   that user's agent session and only `OwnedByOther` and `Begin` read it.
+  `schedules/{JobID}` holds the owner, the job ID and the next run time of
+  each job; it is written and deleted in the same transaction as the job, and
+  only `JobRepository.ListDue`, used by the scheduler, returns entries of more
+  than one user.
 - The user key of a request comes only from a verified Slack event or a verified
   web session. A user's token is used only for that same user's requests.
 - The KMS additional authenticated data of a token is
@@ -132,6 +146,10 @@ UI's use cases end to end, not only unit tests.
   the server reaches it through `--notion-api-url` (accepted only with
   `--no-auth`). Its `/__control` endpoint chooses the next authorization
   result and returns the recorded requests (`e2e/tests/notion.spec.ts`).
+- The Slack Web API of the bot runs end to end too: Playwright starts
+  `e2e/fake-slack.mjs`, and the server reaches it through `--slack-api-url`
+  (accepted only with `--no-auth`). It serves fixed channels for the checks of
+  a new scheduled message (`e2e/tests/scheduled-messages.spec.ts`).
 - Run them with `task e2e` (builds the binary, then `pnpm e2e`). CI runs the
   `e2e` job in `.github/workflows/test.yml`; it must pass.
 - `--no-auth` makes every sign-in the given user without Slack. It is accepted

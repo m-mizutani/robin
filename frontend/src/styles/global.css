@@ -96,6 +96,84 @@ body {
   font-size: 1.125rem;
 }
 
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+}
+
+.job-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+}
+
+.job {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--spacing-sm);
+  padding-bottom: var(--spacing-md);
+  border-bottom: 1px solid var(--border-default);
+}
+
+.card .job-name {
+  font-weight: 600;
+}
+
+.job-form {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--spacing-md);
+}
+
+.field-row {
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+  gap: var(--spacing-md);
+}
+
+.field {
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+}
+
+.field label {
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.field input,
+.field select {
+  width: 100%;
+  padding: var(--spacing-sm);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius);
+  background: var(--bg-paper);
+  color: var(--text-body);
+  font: inherit;
+}
+
+.field input:focus-visible,
+.field select:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 1px;
+}
+
+@media (max-width: 24rem) {
+  .field-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .integration-list {
   list-style: none;
   margin: 0;

@@ -20,7 +20,37 @@ type Repository interface {
 	Session() SessionRepository
 	SlackEvent() SlackEventRepository
 	AgentSession() AgentSessionRepository
+	Job() JobRepository
 	Close() error
+}
+
+// JobRepository keeps the jobs of each user under that user, and one schedule
+// entry per job outside the user's document so the scheduler can find due
+// jobs. The entry is written and deleted in the same transaction as its job.
+type JobRepository interface {
+	// Create stores job and its schedule entry atomically. It fails with
+	// ErrAlreadyExists when the ID is taken and with ErrJobLimitReached when
+	// key already has maxJobs jobs.
+	Create(ctx context.Context, key model.UserKey, job *model.Job, maxJobs int) error
+	// Get fails with ErrNotFound when key has no job of that ID.
+	Get(ctx context.Context, key model.UserKey, id model.JobID) (*model.Job, error)
+	// List returns key's jobs ordered by CreatedAt.
+	List(ctx context.Context, key model.UserKey) ([]*model.Job, error)
+	// Delete removes the job and its schedule entry. A missing job is not an
+	// error. Run records are left to expire.
+	Delete(ctx context.Context, key model.UserKey, id model.JobID) error
+	// ListDue returns up to limit schedule entries of every user whose
+	// NextRunAt is at or before now, oldest first. Only the scheduler calls it.
+	ListDue(ctx context.Context, now time.Time, limit int) ([]*model.JobScheduleEntry, error)
+	// Claim creates req.Run and moves the job to req.NextRunAt, in one
+	// transaction, only while the job's NextRunAt equals req.ScheduledAt and
+	// no run of that ID exists. It reports whether it wrote. A missing job is
+	// not an error.
+	Claim(ctx context.Context, key model.UserKey, req model.JobClaimRequest) (bool, error)
+	// Finish replaces the run with run, which must be finished, and sets the
+	// job's LastRun and UpdatedAt (= run.FinishedAt) while LastRun is the
+	// same run. A missing job is not an error.
+	Finish(ctx context.Context, key model.UserKey, run *model.JobRun) error
 }
 
 // AgentSessionRepository keeps the conversation of one Slack thread under the
