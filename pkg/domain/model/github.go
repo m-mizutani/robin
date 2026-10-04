@@ -139,6 +139,45 @@ func (c *GitHubCredential) LeaseHeld(now time.Time) bool {
 	return c.RefreshLeaseID != "" && now.Before(c.RefreshLeaseExpiresAt)
 }
 
+type GitHubIssueSummary struct {
+	Repository    string // owner/repo
+	Number        int
+	Title         string
+	State         string
+	IsPullRequest bool
+	Author        string
+	UpdatedAt     time.Time
+	HTMLURL       string
+}
+
+type GitHubCodeHit struct {
+	Repository string
+	Path       string
+	HTMLURL    string
+}
+
+type GitHubComment struct {
+	Author    string
+	Body      string
+	CreatedAt time.Time
+}
+
+type GitHubIssue struct {
+	GitHubIssueSummary
+	Body     string
+	Labels   []string
+	Comments []GitHubComment // the first page of comments
+}
+
+// GitHubContent is a file (Text) or a directory (Entries).
+type GitHubContent struct {
+	Type    string // "file" or "dir"
+	Path    string
+	Text    string
+	Entries []string
+	HTMLURL string
+}
+
 // GitHubAccount records which user a GitHub account is connected to, so that
 // one GitHub account is never connected to two users: GitHub deletes an app
 // authorization per account, and one user's disconnection would end the other

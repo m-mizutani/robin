@@ -2,19 +2,60 @@
 
 This document describes how to run Robin: the Slack app, Google Cloud (Cloud KMS
 and Firestore), the optional Google Workspace, Notion, and GitHub
-integrations, the server configuration, and local development.
+integrations, Claude, the server configuration, and local development.
+
+## How Robin answers mentions
+
+When someone mentions Robin, Robin answers in the thread of the mention with
+Claude. Claude reads the services the person has connected (Slack search,
+Notion, Google Workspace, GitHub) with read-only tools that use that person's
+own tokens.
+
+- **One conversation per thread.** The first person who mentions Robin in a
+  thread starts the conversation and owns it. Their later mentions in the same
+  thread continue it: Claude sees the earlier requests, the tool results and
+  the answers. Robin answers nobody else in that thread; they get a message
+  only they can see that asks them to start their own thread. A conversation
+  ends 30 days after it started (`[agent] session_ttl`); the next person who
+  mentions Robin in that thread then starts a new one.
+- **Progress message.** Right after a mention, Robin posts one small message
+  in the thread and keeps replacing its text with what it is doing (for
+  example "Searching Notion for …"). When the run ends, it shows the result,
+  the number of model and tool calls, and the cost.
+- **Cost limit.** Each mention has a budget, `[agent] budget_usd` (default
+  $2.00). Claude sees the spending so far with every call. When the spending
+  reaches 90% of the budget, Robin asks Claude to answer with what it has,
+  without more tools. Robin does not start a model call once the spending has
+  reached the budget, but it cannot stop a call that is already running, so
+  that call can take the total above the budget. Robin also asks Claude to
+  answer at the 20th model call and when the material gathered for one answer
+  reaches 8 MiB, and gives up after 10 minutes.
+- **Private Slack content.** The Slack search finds everything the person can
+  see, including private channels, DMs and group DMs. The answer is posted in
+  the thread, where everyone in the channel can read it, so Claude is told not
+  to quote or copy messages from private channels, DMs or group DMs and to
+  summarize and link to them instead. This is an instruction to the model,
+  not a filter on the answer.
+- **Deleting Robin's messages.** Robin's messages can be deleted with the
+  message shortcut **Delete Robin message** in the **More actions** menu of a
+  message. Only the person whose mention made Robin post the message can
+  delete it. Slack shows the shortcut on every message; on a message Robin did
+  not post, Robin only explains that it cannot delete it. Deleting a message
+  does not change the stored conversation.
 
 ## How Robin uses Slack
 
 - **Bot token** (`xoxb-`): installed once by a workspace administrator. Robin
-  uses it to receive mentions, reply in threads, send login prompts, and read
-  the display name of a user who signs in.
+  uses it to receive mentions, read the thread of a mention, post, update and
+  delete its own messages in threads, send login prompts, and read the display
+  name of a user who signs in.
 - **User tokens** (`xoxp-`): obtained from each user when they sign in on the
   web page. The sign-in is a Slack OAuth v2 authorization that requests the user
   scope `search:read`, so one authorization both identifies the user and
   returns the user's token. Robin encrypts the token with Cloud KMS and stores
   only the ciphertext in Firestore. A token is used only for requests made by
-  the user who owns it.
+  the user who owns it: Claude searches Slack with the token of the person who
+  mentioned Robin.
 - A user who mentions the bot without having signed in receives a message that
   only they can see, with a link to the sign-in page. Signing out on the web
   ends only that browser's session; the stored user token stays, so the bot
@@ -37,9 +78,11 @@ its accounts.
   | `https://www.googleapis.com/auth/drive.readonly` | Search Drive and read files, including Google Docs, Sheets, and Slides |
   | `https://www.googleapis.com/auth/gmail.readonly` | Search and read the user's mail |
 
-  No scope allows creating, changing, deleting, or sending anything. Robin
-  currently obtains and stores this access only; reading Calendar, Drive, or
-  Gmail will be added with the features that need it.
+  No scope allows creating, changing, deleting, or sending anything. Claude
+  uses this access to answer mentions: it searches and reads mail, searches
+  Drive and reads Google Docs, Sheets (as CSV), Slides and text files, and
+  lists the events of the primary calendar. Other file types, such as PDF,
+  are not read.
 - Google lets a user uncheck individual permissions on the consent screen. If
   the Calendar, Drive, or Gmail permission is not granted, Robin revokes the
   grant at Google, stores nothing, and tells the user to connect again.
@@ -65,7 +108,8 @@ its accounts.
   Gmail scope is included), or when an administrator restricts one of the
   services. The settings page does not ask Google whether the stored token is
   still accepted, so it keeps showing **Connected** in these cases; disconnect
-  and connect again to obtain a new token.
+  and connect again to obtain a new token. When Google rejects the token while
+  Claude reads, Claude tells the person to do that.
 
 ## How Robin uses Notion
 
@@ -81,8 +125,8 @@ connection to any other workspace.
   the **Connections** menu of a Notion page.
 - The integration has the **Read content** capability only. Robin can search
   the shared pages and databases, read pages and their content, and read and
-  query databases. It cannot create, change, or comment on anything. No Robin
-  feature uses this access yet.
+  query databases. It cannot create, change, or comment on anything. Claude
+  uses this access to answer mentions.
 - Robin stores the Notion user who authorized, as returned by Notion; it does
   not compare it with the Slack account.
 - One Notion user can be connected to only one Robin user. Whether Notion
@@ -117,8 +161,9 @@ organization that uses Robin.
   (the permission table in step 6), and the app is installed on the account
   that owns them. A repository of an organization where the app is not
   installed stays unreadable even after the user connects.
-- The app gets read permissions only. Robin currently obtains and keeps this
-  access only; reading GitHub will be added with the features that need it.
+- The app gets read permissions only. Claude uses this access to answer
+  mentions: it searches issues, pull requests and code, and reads issues with
+  their comments and repository files.
 - Robin does not use the app's private key or installation tokens, so it
   never reads GitHub on behalf of the app itself.
 - Robin connects the GitHub account that the user authorizes on GitHub; it
@@ -150,9 +195,10 @@ organization that uses Robin.
 ## 1. Create the Slack app
 
 1. Copy `docs/slack-app-manifest.yaml` and replace `robin.example.com` with the
-   public URL of your server (the value of `ROBIN_BASE_URL`). Both the redirect
-   URL (`/api/v1/auth/callback`) and the event request URL (`/hooks/slack/event`)
-   must use that host. A Slack app created before the API moved under
+   public URL of your server (the value of `ROBIN_BASE_URL`). The redirect URL
+   (`/api/v1/auth/callback`), the event request URL (`/hooks/slack/event`) and
+   the interactivity request URL (`/hooks/slack/interaction`, used by the
+   **Delete Robin message** shortcut) must use that host. A Slack app created before the API moved under
    `/api/v1` has `/api/auth/callback` as its redirect URL; change it on **OAuth &
    Permissions** → **Redirect URLs**, or sign-in fails.
 2. Open https://api.slack.com/apps, choose **Create New App** → **From an app
@@ -169,9 +215,16 @@ organization that uses Robin.
 6. Find the workspace ID (starts with `T`) → `ROBIN_SLACK_TEAM_ID`. It is shown
    in the workspace URL of the Slack web client (`https://app.slack.com/client/T.../...`).
 7. The event request URL is verified by Slack only when the server is running.
-   Start the server ([section 7](#7-run-the-server)) and re-verify the URL on **Event Subscriptions** if
+   Start the server ([section 8](#8-run-the-server)) and re-verify the URL on **Event Subscriptions** if
    Slack reported it as unverified.
 8. Invite the bot to the channels where it should answer (`/invite @robin`).
+
+An app created from an older manifest lacks the bot scopes `channels:history`,
+`groups:history` and `mpim:history` (Robin reads the thread of a mention with
+them), the **Delete Robin message** shortcut and the interactivity request
+URL. Update the app's manifest on **App Manifest** with the current file, then
+reinstall the app on **Install App** so the new scopes take effect. Without
+the history scopes, every answer fails when Robin reads the thread.
 
 Keep **Token Rotation** disabled (the manifest sets
 `token_rotation_enabled: false`). Slack does not allow turning it off once it is
@@ -223,6 +276,9 @@ restored.
    ```sh
    gcloud firestore fields ttls update ExpiresAt --collection-group=sessions --enable-ttl --project=$PROJECT_ID
    gcloud firestore fields ttls update ExpiresAt --collection-group=slackEvents --enable-ttl --project=$PROJECT_ID
+   gcloud firestore fields ttls update ExpiresAt --collection-group=agentSessions --enable-ttl --project=$PROJECT_ID
+   gcloud firestore fields ttls update ExpiresAt --collection-group=agentSessionMessages --enable-ttl --project=$PROJECT_ID
+   gcloud firestore fields ttls update ExpiresAt --collection-group=agentThreads --enable-ttl --project=$PROJECT_ID
    ```
 
    TTL deletion runs some time after the expiry; Robin also checks the expiry
@@ -240,14 +296,22 @@ No composite index is needed. Documents are laid out as follows:
 | `notionAccounts/{NotionUserID}` | The only Robin user a Notion user is connected to. Written and deleted together with the credential above |
 | `teams/{TeamID}/users/{UserID}/credentials/github` | Encrypted GitHub access and refresh tokens, their expiry, the connected GitHub account (ID and login), and the lease that lets one instance refresh at a time |
 | `githubAccounts/{GitHubUserID}` | The only Robin user a GitHub account is connected to. Created and deleted together with the credential above |
+| `teams/{TeamID}/users/{UserID}/agentSessions/{AgentSessionID}` | Conversation of one Slack thread with the user who started it: the channel and thread, the number of stored messages, the last answered mention, the lease of a running answer, and the expiry. `AgentSessionID` is `{TeamID}-{ChannelID}-{thread ts without the dot}` |
+| `teams/{TeamID}/users/{UserID}/agentSessions/{AgentSessionID}/agentSessionMessages/{Generation}-{Seq}` | One message of the conversation (the request, Robin's notes to the model, the model's response and tool results) in the format of the model's API |
+| `agentThreads/{AgentSessionID}` | The only Robin user who owns the conversation of a thread. Written together with the conversation above |
 | `sessions/{SessionID}` | Web session (hash of the session secret, owner, expiry) |
 | `slackEvents/{EventID}` | Record of a processed Slack event, used to drop redelivered events (kept 24 hours) |
 
 Everything that belongs to a user is stored under that user's document path.
-`googleWorkspaceAccounts`, `notionAccounts`, and `githubAccounts` are the
-exceptions: they are looked up by the Google account, the Notion user, or the
-GitHub account to keep one account from being connected to two users, and they
-hold only the owner's Slack IDs.
+`googleWorkspaceAccounts`, `notionAccounts`, `githubAccounts`, and
+`agentThreads` are the exceptions: they are looked up by the Google account,
+the Notion user, the GitHub account, or the Slack thread to keep one account
+from being connected to two users and one thread from being answered for two
+users, and they hold only the owner's Slack IDs.
+
+A conversation and its messages expire 30 days after the conversation started
+(`[agent] session_ttl`). The conversation stores what the model read, including
+the content of tool results such as mail bodies and file text.
 
 ## 4. Set up the Google Workspace integration (optional)
 
@@ -288,7 +352,7 @@ organization.
    under **API controls** → **Settings** → **Internal apps**, or open
    **Manage Third-Party App Access** → **Add app** → **OAuth App Name or
    Client ID**, search for the client ID, select it, and choose **Trusted**.
-6. Start Robin with both values set (step 7). Users then connect their account
+6. Start Robin with both values set (step 8). Users then connect their account
    with **Connect Google Workspace** on the settings page.
 
 ## 5. Set up the Notion integration (optional)
@@ -320,7 +384,7 @@ the Notion workspace that Robin should read.
    page: Robin rejects the connection as another workspace and logs the error
    `notion authorization is for another workspace` with the authorized
    `workspace_id`. Set that value and restart Robin.
-8. Start Robin with the three values set (step 7). Users then connect Notion
+8. Start Robin with the three values set (step 8). Users then connect Notion
    with **Connect Notion** on the settings page.
 
 ## 6. Set up the GitHub integration (optional)
@@ -369,10 +433,58 @@ or an app manager of it.
    next to the organization and choose **All repositories**. With **Only
    select repositories**, Robin cannot read the other repositories even for
    users who can.
-5. Start Robin with both values set (step 7). Users then connect their account
+5. Start Robin with both values set (step 8). Users then connect their account
    with **Connect GitHub** on the settings page.
 
-## 7. Run the server
+## 7. Set up Claude
+
+Robin answers mentions with Claude, through Vertex AI or the Claude API. It is
+needed whenever Slack events are enabled (the bot token and the signing
+secret are set); set exactly one of the two options below.
+
+- **Vertex AI**: in the Google Cloud project that runs Robin, enable the
+  Vertex AI API, enable the Claude model (Claude Sonnet 5.5 by default) in
+  **Vertex AI** → **Model Garden**, and grant the service account that runs
+  Robin `roles/aiplatform.user`. Set the project →
+  `ROBIN_LLM_VERTEX_PROJECT_ID`, and the region (default `global`) →
+  `ROBIN_LLM_VERTEX_REGION`. Robin authenticates with Application Default
+  Credentials.
+- **Claude API**: create an API key in the Claude Console and pass it as
+  `ROBIN_ANTHROPIC_API_KEY`, for example from Secret Manager.
+
+The model, its prices, the cost limit of one mention, and how long a
+conversation is kept are set in a TOML file given with `--config`
+(`ROBIN_CONFIG`). Without the file, every value takes the default below.
+
+```toml
+[llm]
+provider = "claude"                # only "claude" is supported
+model = "claude-sonnet-5-5"
+input_usd_per_mtok = 2.0           # dollars per million input tokens
+output_usd_per_mtok = 10.0
+cache_read_usd_per_mtok = 0.2
+cache_write_usd_per_mtok = 2.5     # writes to the 5-minute prompt cache
+
+[agent]
+budget_usd = 2.0                   # budget of one mention
+session_ttl = "720h"               # a conversation ends this long after it started
+```
+
+| Key | Default | Rule |
+| --- | --- | --- |
+| `llm.provider` | `claude` | Only `claude`. Writing it requires `llm.model` and the four prices |
+| `llm.model` | `claude-sonnet-5-5` | Writing it requires the four prices |
+| `llm.*_usd_per_mtok` | `2.0`, `10.0`, `0.2`, `2.5` | Written only together with `llm.model`, all four. Input and output are positive, the cache prices are zero or more |
+| `agent.budget_usd` | `2.0` | Positive |
+| `agent.session_ttl` | `720h` | A positive Go duration such as `168h` |
+
+The defaults are the prices of Claude Sonnet 5.5 on the Claude API. Robin
+measures the cost of each mention with these prices, so write the prices that
+you actually pay, such as the Vertex AI prices of the model, when they differ.
+An unknown key, a value out of range, or a file that cannot be read stops the
+server at startup.
+
+## 8. Run the server
 
 ```sh
 robin serve
@@ -380,6 +492,7 @@ robin serve
 
 | Flag | Environment variable | Default | Required | Description |
 | --- | --- | --- | --- | --- |
+| `--config` | `ROBIN_CONFIG` | | | TOML settings file of the model, prices, cost limit, and conversation lifetime (step 7) |
 | `--addr` | `ROBIN_ADDR` | `:8080` | | Listen address |
 | `--base-url` | `ROBIN_BASE_URL` | | yes | Public URL, `scheme://host[:port]`. Used for the OAuth callback, the link in login prompts, and the `Secure` cookie attribute (`https` only) |
 | `--session-ttl` | `ROBIN_SESSION_TTL` | `168h` | | Lifetime of a web session |
@@ -393,6 +506,9 @@ robin serve
 | `--slack-signing-secret` | `ROBIN_SLACK_SIGNING_SECRET` | | yes (with `--no-auth`: together with the bot token, or neither) | Signing secret, used to verify Events API requests |
 | `--slack-bot-token` | `ROBIN_SLACK_BOT_TOKEN` | | yes (with `--no-auth`: together with the signing secret, or neither) | Bot user OAuth token (`xoxb-`) |
 | `--slack-team-id` | `ROBIN_SLACK_TEAM_ID` | | yes | The only workspace Robin accepts sign-ins and events from |
+| `--llm-vertex-project-id` | `ROBIN_LLM_VERTEX_PROJECT_ID` | | one of this and `--anthropic-api-key` when Slack events are enabled | Google Cloud project to call Claude through Vertex AI (step 7) |
+| `--llm-vertex-region` | `ROBIN_LLM_VERTEX_REGION` | `global` | | Vertex AI region of Claude |
+| `--anthropic-api-key` | `ROBIN_ANTHROPIC_API_KEY` | | one of this and `--llm-vertex-project-id` when Slack events are enabled | API key to call the Claude API directly |
 | `--kms-key-name` | `ROBIN_KMS_KEY_NAME` | | yes (not with `--no-auth`) | Cloud KMS key for the Slack, Google, Notion, and GitHub user tokens |
 | `--google-client-id` | `ROBIN_GOOGLE_CLIENT_ID` | | with `--google-client-secret` | Client ID of the Google OAuth client (step 4). Setting both Google values enables the Google Workspace integration |
 | `--google-client-secret` | `ROBIN_GOOGLE_CLIENT_SECRET` | | with `--google-client-id` | Client secret of the same OAuth client |
@@ -404,8 +520,9 @@ robin serve
 | `--github-client-secret` | `ROBIN_GITHUB_CLIENT_SECRET` | | with `--github-client-id` | Client secret of the same GitHub App |
 | `--no-auth` | `ROBIN_NO_AUTH` | | | Development and E2E only. A Slack user ID (`U...`) of `--slack-team-id`: every web sign-in becomes this user without asking Slack, and no Slack user token is stored. Accepted only with `--repository-backend memory` |
 
-With `--no-auth`, the Slack event endpoint (`/hooks/slack/event`) exists only
-when both the bot token and the signing secret are set. Without
+With `--no-auth`, the Slack endpoints (`/hooks/slack/event` and
+`/hooks/slack/interaction`) exist only when both the bot token and the signing
+secret are set. Without
 `--kms-key-name`, tokens are encrypted with a key that the server generates at
 startup and loses when it stops; the in-memory repository loses the tokens at
 the same time.
@@ -420,10 +537,12 @@ Google Cloud credentials are read from Application Default Credentials.
 - Robin can run as several instances; state shared between requests is kept in
   Firestore.
 - Slack requires a response within three seconds, so Robin acknowledges an
-  event first and handles it in the background of the same process. On Cloud
-  Run, set CPU to be always allocated; with CPU allocated only during requests,
-  the background work is throttled after the response and replies are delayed
-  or lost.
+  event first and handles it in the background of the same process. One
+  answer can run for up to 10 minutes. On Cloud Run, set CPU to be always
+  allocated; with CPU allocated only during requests, the background work is
+  throttled after the response and replies are delayed or lost. An instance
+  that stops in the middle of an answer leaves the conversation locked for 11
+  minutes; the next mention after that continues it.
 - Put TLS in front of the server and use an `https` base URL, so the session
   cookies carry the `Secure` attribute.
 

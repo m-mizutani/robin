@@ -29,6 +29,7 @@ type authUseCase interface {
 
 type slackEventUseCase interface {
 	HandleEvent(ctx context.Context, event *slackevents.EventsAPIEvent) error
+	HandleMessageShortcut(ctx context.Context, s model.SlackMessageShortcut) error
 }
 
 type googleWorkspaceUseCase interface {
@@ -107,8 +108,9 @@ func WithGoogleWorkspace(uc googleWorkspaceUseCase) Option {
 	}
 }
 
-// WithSlackEvents mounts POST /hooks/slack/event. Without it the endpoint does
-// not exist, which is how a no-auth development server without Slack runs.
+// WithSlackEvents mounts POST /hooks/slack/event and POST
+// /hooks/slack/interaction. Without it the endpoints do not exist, which is
+// how a no-auth development server without Slack runs.
 func WithSlackEvents(uc slackEventUseCase, signingSecret string) Option {
 	return func(o *options) {
 		o.slackUC = uc
@@ -194,6 +196,7 @@ func New(authUC authUseCase, cfg Config, opts ...Option) (*Server, error) {
 
 	if o.slackUC != nil {
 		r.With(slackSignatureMiddleware(o.slackSigningSecret)).Post("/hooks/slack/event", s.slackEventHandler)
+		r.With(slackSignatureMiddleware(o.slackSigningSecret)).Post("/hooks/slack/interaction", s.slackInteractionHandler)
 	}
 
 	r.Get("/*", spaHandler(static))

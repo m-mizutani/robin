@@ -65,6 +65,109 @@ func (c *GoogleWorkspaceCredential) Key() UserKey {
 	return UserKey{TeamID: c.TeamID, UserID: c.UserID}
 }
 
+// GmailSearchQuery searches the user's mailbox with Gmail's search syntax.
+type GmailSearchQuery struct {
+	Query      string
+	MaxResults int
+}
+
+func (q GmailSearchQuery) Validate() error {
+	if q.Query == "" {
+		return goerr.New("empty gmail query")
+	}
+	if q.MaxResults < 1 || q.MaxResults > 20 {
+		return goerr.New("gmail max results is out of range", goerr.V("max_results", q.MaxResults))
+	}
+	return nil
+}
+
+type GmailMessageSummary struct {
+	ID       string
+	ThreadID string
+	From     string
+	To       string
+	Subject  string
+	Date     string // the Date header as written
+	Snippet  string
+}
+
+type GmailMessage struct {
+	GmailMessageSummary
+	// Body is the text/plain part, or the raw text/html part when there is
+	// no text/plain part.
+	Body string
+}
+
+// DriveSearchQuery searches the full text of the files the user can read.
+type DriveSearchQuery struct {
+	Query      string
+	MaxResults int
+}
+
+func (q DriveSearchQuery) Validate() error {
+	if q.Query == "" {
+		return goerr.New("empty drive query")
+	}
+	if q.MaxResults < 1 || q.MaxResults > 20 {
+		return goerr.New("drive max results is out of range", goerr.V("max_results", q.MaxResults))
+	}
+	return nil
+}
+
+type DriveFile struct {
+	ID           string
+	Name         string
+	MimeType     string
+	ModifiedTime time.Time
+	WebViewLink  string
+	Owners       []string // email addresses
+}
+
+type DriveFileText struct {
+	DriveFile
+	Text string
+}
+
+// calendarMaxRange is the widest period one listing reads.
+const calendarMaxRange = 93 * 24 * time.Hour
+
+// CalendarEventQuery lists the events of the user's primary calendar that
+// overlap [TimeMin, TimeMax).
+type CalendarEventQuery struct {
+	TimeMin    time.Time
+	TimeMax    time.Time
+	Query      string
+	MaxResults int
+}
+
+func (q CalendarEventQuery) Validate() error {
+	if q.TimeMin.IsZero() || q.TimeMax.IsZero() {
+		return goerr.New("calendar period needs both time_min and time_max")
+	}
+	if !q.TimeMin.Before(q.TimeMax) {
+		return goerr.New("calendar time_min must be before time_max")
+	}
+	if q.TimeMax.Sub(q.TimeMin) > calendarMaxRange {
+		return goerr.New("calendar period is longer than 93 days")
+	}
+	if q.MaxResults < 1 || q.MaxResults > 50 {
+		return goerr.New("calendar max results is out of range", goerr.V("max_results", q.MaxResults))
+	}
+	return nil
+}
+
+type CalendarEvent struct {
+	ID          string
+	Summary     string
+	Description string
+	Location    string
+	Start       string // RFC 3339, or a date for an all-day event
+	End         string
+	Organizer   string
+	Attendees   []string
+	HTMLLink    string
+}
+
 func (c *GoogleWorkspaceCredential) Validate() error {
 	if err := c.Key().Validate(); err != nil {
 		return goerr.Wrap(err, "invalid google workspace credential key")

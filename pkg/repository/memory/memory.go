@@ -15,6 +15,7 @@ type Memory struct {
 	githubCredential          *githubCredentialRepository
 	session                   *sessionRepository
 	slackEvent                *slackEventRepository
+	agentSession              *agentSessionRepository
 }
 
 var _ interfaces.Repository = &Memory{}
@@ -28,6 +29,7 @@ func New() *Memory {
 		githubCredential:          newGitHubCredentialRepository(),
 		session:                   newSessionRepository(),
 		slackEvent:                newSlackEventRepository(),
+		agentSession:              newAgentSessionRepository(),
 	}
 }
 
@@ -44,6 +46,9 @@ func (m *Memory) GitHubCredential() interfaces.GitHubCredentialRepository {
 }
 func (m *Memory) Session() interfaces.SessionRepository       { return m.session }
 func (m *Memory) SlackEvent() interfaces.SlackEventRepository { return m.slackEvent }
+func (m *Memory) AgentSession() interfaces.AgentSessionRepository {
+	return m.agentSession
+}
 
 func (m *Memory) Close() error {
 	return nil

@@ -22,6 +22,7 @@ func clearServeEnv(t *testing.T) {
 		"ROBIN_GOOGLE_CLIENT_ID", "ROBIN_GOOGLE_CLIENT_SECRET",
 		"ROBIN_NOTION_CLIENT_ID", "ROBIN_NOTION_CLIENT_SECRET", "ROBIN_NOTION_WORKSPACE_ID", "ROBIN_NOTION_API_URL",
 		"ROBIN_GITHUB_CLIENT_ID", "ROBIN_GITHUB_CLIENT_SECRET",
+		"ROBIN_CONFIG", "ROBIN_LLM_VERTEX_PROJECT_ID", "ROBIN_LLM_VERTEX_REGION", "ROBIN_ANTHROPIC_API_KEY",
 	} {
 		t.Setenv(name, "")
 		gt.NoError(t, os.Unsetenv(name)).Required()
@@ -39,6 +40,7 @@ func validServeArgs() []string {
 		"--slack-bot-token", "xoxb-token",
 		"--slack-team-id", "T0123ABCD",
 		"--kms-key-name", "projects/p/locations/l/keyRings/r/cryptoKeys/k",
+		"--anthropic-api-key", "sk-ant-test",
 	}
 }
 
@@ -66,6 +68,7 @@ func TestServe_RequiredFlags(t *testing.T) {
 		"--slack-bot-token",
 		"--slack-team-id",
 		"--kms-key-name",
+		"--anthropic-api-key",
 	} {
 		t.Run(flag, func(t *testing.T) {
 			err := cli.Run(context.Background(), without(validServeArgs(), flag), "test")
@@ -205,6 +208,40 @@ func TestServe_GitHubNeedsBothFlags(t *testing.T) {
 			}
 		})
 	}
+}
+
+// With Slack events, the agent is assembled with the LLM endpoint and the
+// settings file before the server starts.
+func TestServe_NoAuthAcceptsSlackAgent(t *testing.T) {
+	clearServeEnv(t)
+	args := append(noAuthGitHubArgs(),
+		"--slack-bot-token", "xoxb-token",
+		"--slack-signing-secret", "signing-secret",
+		"--anthropic-api-key", "sk-ant-test",
+		"--config", "config/testdata/full.toml",
+	)
+	err := cli.Run(context.Background(), args, "test")
+	gt.Value(t, err).NotNil().Required()
+	gt.String(t, err.Error()).Contains("HTTP server stopped")
+}
+
+func TestServe_SlackAgentNeedsLLM(t *testing.T) {
+	clearServeEnv(t)
+	args := append(noAuthGitHubArgs(), "--slack-bot-token", "xoxb-token", "--slack-signing-secret", "signing-secret")
+	err := cli.Run(context.Background(), args, "test")
+	gt.Value(t, err).NotNil().Required()
+	gt.String(t, err.Error()).Contains("--llm-vertex-project-id or --anthropic-api-key is required")
+
+	err = cli.Run(context.Background(), append(validServeArgs(), "--llm-vertex-project-id", "my-project"), "test")
+	gt.Value(t, err).NotNil().Required()
+	gt.String(t, err.Error()).Contains("set only one of --llm-vertex-project-id and --anthropic-api-key")
+}
+
+func TestServe_InvalidSettingsFile(t *testing.T) {
+	clearServeEnv(t)
+	err := cli.Run(context.Background(), append(noAuthGitHubArgs(), "--config", "config/testdata/unknown_key.toml"), "test")
+	gt.Value(t, err).NotNil().Required()
+	gt.String(t, err.Error()).Contains("failed to read the settings file")
 }
 
 func TestRun_InvalidLogLevel(t *testing.T) {

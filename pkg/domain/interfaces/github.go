@@ -31,4 +31,10 @@ type GitHubUserClientFactory interface {
 type GitHubUserClient interface {
 	// GetUser fails with ErrGitHubTokenInvalid when GitHub answers 401.
 	GetUser(ctx context.Context) (*model.GitHubIdentity, error)
+	// The methods below fail with ErrGitHubTokenInvalid on 401 and
+	// ErrGitHubNotFound on 404.
+	SearchIssues(ctx context.Context, query string, perPage int) ([]model.GitHubIssueSummary, error)
+	SearchCode(ctx context.Context, query string, perPage int) ([]model.GitHubCodeHit, error)
+	GetIssue(ctx context.Context, owner, repo string, number int) (*model.GitHubIssue, error)
+	GetContent(ctx context.Context, owner, repo, path, ref string) (*model.GitHubContent, error)
 }

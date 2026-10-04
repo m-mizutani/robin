@@ -67,3 +67,54 @@ type SlackIdentity struct {
 	TeamID SlackTeamID
 	UserID SlackUserID
 }
+
+// SlackThreadMessage is one message of a thread as Robin reads it.
+type SlackThreadMessage struct {
+	TS     string
+	UserID SlackUserID // empty for a bot message
+	BotID  string
+	// FromRobin is set for an answer Robin posted.
+	FromRobin bool
+	Text      string
+}
+
+// SlackPostedMessage is a message Robin read back before deleting it.
+type SlackPostedMessage struct {
+	TS       string
+	ThreadTS string // ts of the thread's parent; TS itself for a message outside a thread
+	// Requester is the user whose mention made Robin post the message. It is
+	// empty for a message Robin did not post.
+	Requester SlackUserID
+}
+
+// SlackMessageShortcut is a message shortcut a user chose on a message.
+type SlackMessageShortcut struct {
+	TeamID     SlackTeamID
+	CallbackID string
+	ChannelID  string
+	UserID     SlackUserID // the user who chose the shortcut
+	MessageTS  string
+}
+
+// Kinds of conversation a search result comes from. "group" and "im" are the
+// values search.messages uses for a private channel and a DM.
+const (
+	SlackChannelTypePublic  = "channel"
+	SlackChannelTypePrivate = "group"
+	SlackChannelTypeIM      = "im"
+	SlackChannelTypeMPIM    = "mpim"
+)
+
+// SlackMessageHit is one result of search.messages.
+type SlackMessageHit struct {
+	ChannelID   string
+	ChannelName string
+	// ChannelType is SlackChannelTypePublic, SlackChannelTypePrivate,
+	// SlackChannelTypeIM or SlackChannelTypeMPIM.
+	ChannelType string
+	UserID      SlackUserID
+	Username    string
+	TS          string
+	Text        string
+	Permalink   string
+}

@@ -23,6 +23,7 @@ import (
 type recordedRequest struct {
 	Method        string
 	Path          string
+	Query         url.Values
 	Header        http.Header
 	Body          string
 	Form          url.Values
@@ -56,6 +57,7 @@ func newFakeGitHub(t *testing.T, responses map[string]fakeResponse) *fakeGitHub 
 		f.requests = append(f.requests, recordedRequest{
 			Method:        r.Method,
 			Path:          r.URL.Path,
+			Query:         r.URL.Query(),
 			Header:        r.Header.Clone(),
 			Body:          string(body),
 			Form:          form,

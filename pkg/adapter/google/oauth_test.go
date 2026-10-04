@@ -21,6 +21,7 @@ import (
 type recordedRequest struct {
 	Method        string
 	Path          string
+	Query         url.Values
 	ContentType   string
 	Authorization string
 	Form          url.Values
@@ -31,7 +32,8 @@ type fakeResponse struct {
 	body   string
 }
 
-// fakeGoogle serves fixed responses per path and records every request.
+// fakeGoogle serves fixed responses per path and records every request. A
+// download (alt=media) of a path is answered by the entry path+"#media".
 type fakeGoogle struct {
 	mu        sync.Mutex
 	server    *httptest.Server
@@ -49,11 +51,16 @@ func newFakeGoogle(t *testing.T, responses map[string]fakeResponse) *fakeGoogle 
 		f.requests = append(f.requests, recordedRequest{
 			Method:        r.Method,
 			Path:          r.URL.Path,
+			Query:         r.URL.Query(),
 			ContentType:   r.Header.Get("Content-Type"),
 			Authorization: r.Header.Get("Authorization"),
 			Form:          form,
 		})
-		resp, ok := f.responses[r.URL.Path]
+		key := r.URL.Path
+		if r.URL.Query().Get("alt") == "media" {
+			key += "#media"
+		}
+		resp, ok := f.responses[key]
 		f.mu.Unlock()
 		if !ok {
 			http.NotFound(w, r)

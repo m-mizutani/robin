@@ -14,8 +14,10 @@ import (
 	"time"
 
 	"github.com/m-mizutani/goerr/v2"
+	"github.com/slack-go/slack"
 	"github.com/slack-go/slack/slackevents"
 
+	"github.com/m-mizutani/robin/pkg/domain/model"
 	"github.com/m-mizutani/robin/pkg/utils/async"
 	"github.com/m-mizutani/robin/pkg/utils/errutil"
 )
@@ -132,4 +134,44 @@ func (s *Server) slackEventHandler(w http.ResponseWriter, r *http.Request) {
 	default:
 		w.WriteHeader(http.StatusOK)
 	}
+}
+
+// slackInteractionHandler receives the interactivity requests of the Slack
+// app. Slack sends them as a form with one "payload" field holding JSON. Only
+// message shortcuts are handled; the rest are acknowledged and ignored.
+func (s *Server) slackInteractionHandler(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	if err := r.ParseForm(); err != nil {
+		errutil.Handle(ctx, goerr.Wrap(err, "failed to parse slack interaction form"), "slack interaction rejected")
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	payload := r.PostForm.Get("payload")
+	if payload == "" {
+		errutil.Handle(ctx, goerr.New("slack interaction has no payload"), "slack interaction rejected")
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	var callback slack.InteractionCallback
+	if err := json.Unmarshal([]byte(payload), &callback); err != nil {
+		errutil.Handle(ctx, goerr.Wrap(err, "failed to parse slack interaction payload"), "slack interaction rejected")
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	if callback.Type != slack.InteractionTypeMessageAction {
+		return
+	}
+	shortcut := model.SlackMessageShortcut{
+		TeamID:     model.SlackTeamID(callback.Team.ID),
+		CallbackID: callback.CallbackID,
+		ChannelID:  callback.Channel.ID,
+		UserID:     model.SlackUserID(callback.User.ID),
+		MessageTS:  callback.MessageTs,
+	}
+	async.Dispatch(ctx, func(ctx context.Context) error {
+		return s.slackUC.HandleMessageShortcut(ctx, shortcut)
+	})
 }

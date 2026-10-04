@@ -53,4 +53,22 @@ var (
 	// ErrGitHubAccountInUse is returned when a GitHub account is already
 	// connected to another user.
 	ErrGitHubAccountInUse = errors.New("github account is connected to another user")
+
+	// ErrGoogleNotFound is returned when Google answers 404.
+	ErrGoogleNotFound = errors.New("google object not found")
+
+	// ErrGoogleUnsupportedFile is returned for a Drive file that cannot be
+	// turned into text.
+	ErrGoogleUnsupportedFile = errors.New("google drive file cannot be read as text")
+
+	// ErrGitHubNotFound is returned when GitHub answers 404.
+	ErrGitHubNotFound = errors.New("github object not found")
+
+	// ErrSlackMessageNotFound is returned when a Slack message does not exist
+	// or Robin cannot read it.
+	ErrSlackMessageNotFound = errors.New("slack message not found")
+
+	// ErrLLMHistoryIncompatible means the stored conversation was written by
+	// another provider or format version and cannot be continued.
+	ErrLLMHistoryIncompatible = errors.New("llm history format is not supported by this client")
 )

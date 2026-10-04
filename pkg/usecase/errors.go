@@ -81,4 +81,12 @@ var (
 	// ErrGitHubRefreshTimeout means another instance kept refreshing the
 	// user's token for longer than the wait limit.
 	ErrGitHubRefreshTimeout = errors.New("timed out waiting for the github token refresh")
+
+	// ErrGoogleWorkspaceReconnectRequired means Google rejected the stored
+	// refresh token; the user has to disconnect and connect again.
+	ErrGoogleWorkspaceReconnectRequired = errors.New("google workspace needs to be reconnected")
+
+	// ErrAgentSessionLeaseLost means another run took the session's lease
+	// before this run committed.
+	ErrAgentSessionLeaseLost = errors.New("agent session lease was lost")
 )

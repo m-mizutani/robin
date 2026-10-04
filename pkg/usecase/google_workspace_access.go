@@ -15,12 +15,14 @@ import (
 // refresh tokens. Callers must pass a key derived from a verified web session
 // of that same user; a token is never used on behalf of anyone else.
 type GoogleWorkspaceAccess struct {
-	repo   interfaces.Repository
-	cipher interfaces.Cipher
+	repo    interfaces.Repository
+	cipher  interfaces.Cipher
+	clients interfaces.GoogleWorkspaceClientFactory
 }
 
-func NewGoogleWorkspaceAccess(repo interfaces.Repository, cipher interfaces.Cipher) *GoogleWorkspaceAccess {
-	return &GoogleWorkspaceAccess{repo: repo, cipher: cipher}
+func NewGoogleWorkspaceAccess(repo interfaces.Repository, cipher interfaces.Cipher,
+	clients interfaces.GoogleWorkspaceClientFactory) *GoogleWorkspaceAccess {
+	return &GoogleWorkspaceAccess{repo: repo, cipher: cipher, clients: clients}
 }
 
 // googleTokenAAD binds a ciphertext to its owner, so a ciphertext copied into
@@ -109,6 +111,58 @@ func (a *GoogleWorkspaceAccess) Delete(ctx context.Context, token *GoogleWorkspa
 		return goerr.Wrap(err, "failed to delete google workspace credential")
 	}
 	return nil
+}
+
+// callGoogle runs fn with a client of the user's refresh token. It fails with
+// ErrGoogleWorkspaceNotConnected when no token is stored and with
+// ErrGoogleWorkspaceReconnectRequired when Google rejects it. The credential
+// is kept in that case: the user disconnects and connects again from the
+// settings page.
+func callGoogle[T any](ctx context.Context, a *GoogleWorkspaceAccess, key model.UserKey, fn func(interfaces.GoogleWorkspaceClient) (T, error)) (T, error) {
+	var zero T
+	token, err := a.Token(ctx, key)
+	if err != nil {
+		return zero, err
+	}
+	res, err := fn(a.clients.New(token.RefreshToken))
+	if err != nil {
+		vals := []goerr.Option{goerr.V("team_id", key.TeamID), goerr.V("user_id", key.UserID)}
+		if errors.Is(err, interfaces.ErrGoogleTokenInvalid) {
+			return zero, goerr.Wrap(errors.Join(ErrGoogleWorkspaceReconnectRequired, err), "google rejected the stored refresh token", vals...)
+		}
+		return zero, goerr.Wrap(err, "google workspace request failed", vals...)
+	}
+	return res, nil
+}
+
+func (a *GoogleWorkspaceAccess) SearchGmail(ctx context.Context, key model.UserKey, q model.GmailSearchQuery) ([]model.GmailMessageSummary, error) {
+	return callGoogle(ctx, a, key, func(c interfaces.GoogleWorkspaceClient) ([]model.GmailMessageSummary, error) {
+		return c.SearchGmail(ctx, q)
+	})
+}
+
+func (a *GoogleWorkspaceAccess) GetGmailMessage(ctx context.Context, key model.UserKey, id string) (*model.GmailMessage, error) {
+	return callGoogle(ctx, a, key, func(c interfaces.GoogleWorkspaceClient) (*model.GmailMessage, error) {
+		return c.GetGmailMessage(ctx, id)
+	})
+}
+
+func (a *GoogleWorkspaceAccess) SearchDrive(ctx context.Context, key model.UserKey, q model.DriveSearchQuery) ([]model.DriveFile, error) {
+	return callGoogle(ctx, a, key, func(c interfaces.GoogleWorkspaceClient) ([]model.DriveFile, error) {
+		return c.SearchDrive(ctx, q)
+	})
+}
+
+func (a *GoogleWorkspaceAccess) GetDriveFileText(ctx context.Context, key model.UserKey, id string) (*model.DriveFileText, error) {
+	return callGoogle(ctx, a, key, func(c interfaces.GoogleWorkspaceClient) (*model.DriveFileText, error) {
+		return c.GetDriveFileText(ctx, id)
+	})
+}
+
+func (a *GoogleWorkspaceAccess) ListCalendarEvents(ctx context.Context, key model.UserKey, q model.CalendarEventQuery) ([]model.CalendarEvent, error) {
+	return callGoogle(ctx, a, key, func(c interfaces.GoogleWorkspaceClient) ([]model.CalendarEvent, error) {
+		return c.ListCalendarEvents(ctx, q)
+	})
 }
 
 // Connection reports whether a credential is stored and which account it is

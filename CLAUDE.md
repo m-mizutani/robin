@@ -21,12 +21,14 @@ GraphQL.
 - `pkg/domain/` — models (`model/`, also the Firestore document format) and
   interfaces (`interfaces/`). No I/O.
 - `pkg/repository/{firestore,memory}/` — persistence.
-- `pkg/adapter/{slack,google,notion,github,kms}/` — thin wrappers that implement
-  `domain/interfaces` over an external API. No business decisions.
+- `pkg/adapter/{slack,google,notion,github,kms,claude}/` — thin wrappers that
+  implement `domain/interfaces` over an external API. No business decisions.
   `pkg/adapter/localcipher/` replaces KMS only with `--no-auth` and no KMS key.
+  `claude` implements the LLM boundary (`interfaces.LLMClient`); the usecase
+  never imports a provider's SDK.
 - Every API route is under `/api/v1` (`apiV1Path` in
-  `pkg/controller/http/auth.go`); only the SPA and `/hooks/slack/event` are
-  outside it.
+  `pkg/controller/http/auth.go`); only the SPA, `/hooks/slack/event`, and
+  `/hooks/slack/interaction` are outside it.
 - `pkg/utils/` — `logging`, `errutil`, `async`, `safe`.
 
 Slack Events API handlers acknowledge within three seconds and run the rest in
@@ -44,6 +46,9 @@ Slack Events API handlers acknowledge within three seconds and run the rest in
   `AccountInUse` reads whether another user owns it. `notionAccounts/{NotionUserID}`
   does the same for Notion users and Notion credentials, and
   `githubAccounts/{GitHubUserID}` for GitHub accounts and GitHub credentials.
+  `agentThreads/{AgentSessionID}` records the only user whose agent
+  conversation a Slack thread holds; it is written in the same transaction as
+  that user's agent session and only `OwnedByOther` and `Begin` read it.
 - The user key of a request comes only from a verified Slack event or a verified
   web session. A user's token is used only for that same user's requests.
 - The KMS additional authenticated data of a token is
@@ -73,7 +78,9 @@ Slack Events API handlers acknowledge within three seconds and run the rest in
   usecase owns `CreatedAt` / `UpdatedAt`.
 - Multiple instances run concurrently. State shared across requests goes to
   Firestore; no package-level maps or caches of business data.
-- Default values come from CLI flags, not from internal functions.
+- Default values come from CLI flags, not from internal functions. The
+  settings of the TOML file (`--config`) have no flags; their defaults are the
+  constants of `pkg/cli/config/file.go`, applied when the file is loaded.
 - Source comments and string literals are English. Unexport everything not used
   by another package; test-only access goes through `export_test.go`.
 
