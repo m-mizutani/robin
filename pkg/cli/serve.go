@@ -60,10 +60,6 @@ const (
 	agentHistoryByteLimit = 8 << 20
 	llmMaxTokens          = 16000
 	llmEffort             = anthropic.BetaOutputConfigEffortMedium
-
-	// maxJobsPerUser bounds the scheduled jobs, and so the model calls, of
-	// one user.
-	maxJobsPerUser = 10
 )
 
 type serveConfig struct {
@@ -122,7 +118,7 @@ func (c *serveConfig) validateAuth() error {
 		if err := c.slackApp.Validate(); err != nil {
 			return err
 		}
-		if err := c.slackBot.Validate(true, false); err != nil {
+		if err := c.slackBot.Validate(true); err != nil {
 			return err
 		}
 		return c.kms.Validate()
@@ -135,9 +131,6 @@ func (c *serveConfig) validateAuth() error {
 		return goerr.New("--no-auth requires --repository-backend memory")
 	}
 	if err := c.slackApp.ValidateForNoAuth(); err != nil {
-		return err
-	}
-	if err := c.slackBot.Validate(false, true); err != nil {
 		return err
 	}
 	// The bot token and the signing secret receive Slack events, so they are
@@ -255,10 +248,7 @@ func runServe(ctx context.Context, cfg *serveConfig) error {
 		services.GitHub = githubAccess
 		httpOpts = append(httpOpts, httpctrl.WithGitHub(githubUC))
 	}
-	if bot != nil {
-		jobUC := usecase.NewJobUseCase(repo, bot, usecase.JobConfig{MaxJobsPerUser: maxJobsPerUser})
-		httpOpts = append(httpOpts, httpctrl.WithJobs(jobUC))
-	}
+	httpOpts = append(httpOpts, httpctrl.WithJobs(usecase.NewJobSettingUseCase(repo)))
 	if cfg.eventsEnabled() {
 		llm, err := cfg.llm.NewClient(ctx, settings.Model, llmMaxTokens, llmEffort)
 		if err != nil {

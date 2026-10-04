@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/m-mizutani/goerr/v2"
@@ -20,171 +19,150 @@ const (
 	// jobRequestMaxBytes is far above the size of a valid request.
 	jobRequestMaxBytes = 4096
 
-	// Codes of a rejected new job. The settings page shows a message for each.
-	errCodeInvalidInput      = "invalid_input"
-	errCodeChannelNotFound   = "channel_not_found"
-	errCodeChannelArchived   = "channel_archived"
-	errCodeRobinNotInChannel = "robin_not_in_channel"
-	errCodeUserNotInChannel  = "user_not_in_channel"
-	errCodeJobLimitReached   = "job_limit_reached"
+	errCodeInvalidInput    = "invalid_input"
+	errCodeSettingRequired = "setting_required"
 )
 
-type jobRunResponse struct {
-	Status      string     `json:"status"`
-	Failure     string     `json:"failure"`
-	ScheduledAt time.Time  `json:"scheduled_at"`
-	Deadline    *time.Time `json:"deadline"`
-	FinishedAt  *time.Time `json:"finished_at"`
-}
-
-type jobResponse struct {
-	ID          string          `json:"id"`
-	Kind        string          `json:"kind"`
-	ChannelID   string          `json:"channel_id"`
-	ChannelName string          `json:"channel_name"`
-	Hour        int             `json:"hour"`
-	Minute      int             `json:"minute"`
-	TimeZone    string          `json:"time_zone"`
-	NextRunAt   time.Time       `json:"next_run_at"`
-	LastRun     *jobRunResponse `json:"last_run"`
-}
-
-type jobsResponse struct {
-	Available bool          `json:"available"`
-	MaxJobs   int           `json:"max_jobs"`
-	Jobs      []jobResponse `json:"jobs"`
-}
-
-type jobCreateRequest struct {
-	Kind      string `json:"kind"`
+type jobSettingResponse struct {
 	ChannelID string `json:"channel_id"`
-	Hour      int    `json:"hour"`
-	Minute    int    `json:"minute"`
 	TimeZone  string `json:"time_zone"`
 }
 
-func optionalTime(t time.Time) *time.Time {
-	if t.IsZero() {
-		return nil
-	}
-	utc := t.UTC()
-	return &utc
+type jobTriggerResponse struct {
+	ID     string `json:"id"`
+	Job    string `json:"job"`
+	Hour   int    `json:"hour"`
+	Minute int    `json:"minute"`
 }
 
-func toJobResponse(j *model.Job) jobResponse {
-	out := jobResponse{
-		ID:          string(j.ID),
-		Kind:        string(j.Kind),
-		ChannelID:   j.ChannelID,
-		ChannelName: j.ChannelName,
-		Hour:        j.Schedule.Hour,
-		Minute:      j.Schedule.Minute,
-		TimeZone:    j.Schedule.TimeZone,
-		NextRunAt:   j.NextRunAt.UTC(),
-	}
-	if r := j.LastRun; r != nil {
-		out.LastRun = &jobRunResponse{
-			Status:      string(r.Status),
-			Failure:     string(r.Failure),
-			ScheduledAt: r.ScheduledAt.UTC(),
-			Deadline:    optionalTime(r.Deadline),
-			FinishedAt:  optionalTime(r.FinishedAt),
-		}
-	}
-	return out
+type jobsResponse struct {
+	Setting  *jobSettingResponse  `json:"setting"`
+	Triggers []jobTriggerResponse `json:"triggers"`
 }
 
-func (s *Server) jobsListHandler(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	session, ok := sessionFromRequest(w, r)
-	if !ok {
-		return
-	}
-	if s.jobUC == nil {
-		writeJSON(ctx, w, http.StatusOK, jobsResponse{Jobs: []jobResponse{}})
-		return
-	}
-
-	list, err := s.jobUC.List(ctx, session.Key())
-	if err != nil {
-		errutil.Handle(ctx, err, "failed to list jobs")
-		writeError(ctx, w, http.StatusInternalServerError, errCodeInternal)
-		return
-	}
-	jobs := make([]jobResponse, 0, len(list.Jobs))
-	for _, j := range list.Jobs {
-		jobs = append(jobs, toJobResponse(j))
-	}
-	writeJSON(ctx, w, http.StatusOK, jobsResponse{Available: true, MaxJobs: list.MaxJobs, Jobs: jobs})
+type jobSettingRequest struct {
+	ChannelID string `json:"channel_id"`
+	TimeZone  string `json:"time_zone"`
 }
 
-// rejectedJobs maps the errors of a new job that come from the user's input
-// to the status and code the settings page reads.
-var rejectedJobs = []struct {
-	err    error
-	status int
-	code   string
-}{
-	{usecase.ErrJobInvalidInput, http.StatusBadRequest, errCodeInvalidInput},
-	{usecase.ErrJobChannelNotFound, http.StatusBadRequest, errCodeChannelNotFound},
-	{usecase.ErrJobChannelArchived, http.StatusBadRequest, errCodeChannelArchived},
-	{usecase.ErrJobRobinNotInChannel, http.StatusBadRequest, errCodeRobinNotInChannel},
-	{usecase.ErrJobUserNotInChannel, http.StatusBadRequest, errCodeUserNotInChannel},
-	{usecase.ErrJobLimitReached, http.StatusConflict, errCodeJobLimitReached},
+// jobTriggerRequest takes pointers so that a missing or null hour or minute
+// is rejected instead of becoming 0, which is a valid time.
+type jobTriggerRequest struct {
+	Job    string `json:"job"`
+	Hour   *int   `json:"hour"`
+	Minute *int   `json:"minute"`
 }
 
-func (s *Server) jobsCreateHandler(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	session, ok := sessionFromRequest(w, r)
-	if !ok {
-		return
-	}
+func toJobTriggerResponse(t model.JobTrigger) jobTriggerResponse {
+	return jobTriggerResponse{ID: string(t.ID), Job: string(t.Job), Hour: t.Time.Hour, Minute: t.Time.Minute}
+}
 
-	var req jobCreateRequest
+// decodeJobRequest reads a small JSON body without unknown keys. On failure
+// it writes the error response and returns false.
+func decodeJobRequest(w http.ResponseWriter, r *http.Request, dst any) bool {
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, jobRequestMaxBytes))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil {
-		errutil.Handle(ctx, goerr.Wrap(err, "invalid job request", goerr.T(errutil.TagBenign)), "job was not added")
+	if err := dec.Decode(dst); err != nil {
+		errutil.Handle(r.Context(), goerr.Wrap(err, "invalid job request", goerr.T(errutil.TagBenign)), "job request rejected")
+		writeError(r.Context(), w, http.StatusBadRequest, errCodeInvalidInput)
+		return false
+	}
+	return true
+}
+
+// writeJobError answers the errors that come from the user's input with a
+// fixed code, and any other error with 500.
+func writeJobError(w http.ResponseWriter, r *http.Request, err error, msg string) {
+	ctx := r.Context()
+	switch {
+	case errors.Is(err, usecase.ErrJobInputInvalid):
+		errutil.Handle(ctx, goerr.Wrap(err, msg, goerr.T(errutil.TagBenign)), "job request rejected")
+		writeError(ctx, w, http.StatusBadRequest, errCodeInvalidInput)
+	case errors.Is(err, usecase.ErrJobSettingRequired):
+		errutil.Handle(ctx, goerr.Wrap(err, msg, goerr.T(errutil.TagBenign)), "job request rejected")
+		writeError(ctx, w, http.StatusConflict, errCodeSettingRequired)
+	default:
+		errutil.Handle(ctx, err, msg)
+		writeError(ctx, w, http.StatusInternalServerError, errCodeInternal)
+	}
+}
+
+func (s *Server) jobsGetHandler(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	session, ok := sessionFromRequest(w, r)
+	if !ok {
+		return
+	}
+	setting, err := s.jobUC.Get(ctx, session.Key())
+	if err != nil {
+		writeJobError(w, r, err, "failed to get job setting")
+		return
+	}
+	resp := jobsResponse{Triggers: []jobTriggerResponse{}}
+	if setting != nil {
+		resp.Setting = &jobSettingResponse{ChannelID: setting.ChannelID, TimeZone: setting.TimeZone}
+		for _, t := range setting.Triggers {
+			resp.Triggers = append(resp.Triggers, toJobTriggerResponse(t))
+		}
+	}
+	writeJSON(ctx, w, http.StatusOK, resp)
+}
+
+func (s *Server) jobSettingPutHandler(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	session, ok := sessionFromRequest(w, r)
+	if !ok {
+		return
+	}
+	var req jobSettingRequest
+	if !decodeJobRequest(w, r, &req) {
+		return
+	}
+	setting, err := s.jobUC.Save(ctx, session.Key(), req.ChannelID, req.TimeZone)
+	if err != nil {
+		writeJobError(w, r, err, "failed to save job setting")
+		return
+	}
+	writeJSON(ctx, w, http.StatusOK, jobSettingResponse{ChannelID: setting.ChannelID, TimeZone: setting.TimeZone})
+}
+
+func (s *Server) jobTriggerPostHandler(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	session, ok := sessionFromRequest(w, r)
+	if !ok {
+		return
+	}
+	var req jobTriggerRequest
+	if !decodeJobRequest(w, r, &req) {
+		return
+	}
+	if req.Hour == nil || req.Minute == nil {
+		errutil.Handle(ctx, goerr.New("job trigger request without a time", goerr.T(errutil.TagBenign),
+			goerr.V("has_hour", req.Hour != nil), goerr.V("has_minute", req.Minute != nil)), "job request rejected")
 		writeError(ctx, w, http.StatusBadRequest, errCodeInvalidInput)
 		return
 	}
-
-	job, err := s.jobUC.Create(ctx, session.Key(), usecase.JobInput{
-		Kind:      model.JobKind(req.Kind),
-		ChannelID: req.ChannelID,
-		Hour:      req.Hour,
-		Minute:    req.Minute,
-		TimeZone:  req.TimeZone,
-	})
+	t, err := s.jobUC.AddTrigger(ctx, session.Key(), model.JobName(req.Job), model.DailyTime{Hour: *req.Hour, Minute: *req.Minute})
 	if err != nil {
-		for _, rej := range rejectedJobs {
-			if errors.Is(err, rej.err) {
-				errutil.Handle(ctx, goerr.Wrap(err, "job rejected", goerr.T(errutil.TagBenign)), "job was not added")
-				writeError(ctx, w, rej.status, rej.code)
-				return
-			}
-		}
-		errutil.Handle(ctx, err, "failed to add job")
-		writeError(ctx, w, http.StatusInternalServerError, errCodeInternal)
+		writeJobError(w, r, err, "failed to add job trigger")
 		return
 	}
-	writeJSON(ctx, w, http.StatusCreated, toJobResponse(job))
+	writeJSON(ctx, w, http.StatusCreated, toJobTriggerResponse(*t))
 }
 
-func (s *Server) jobsDeleteHandler(w http.ResponseWriter, r *http.Request) {
+func (s *Server) jobTriggerDeleteHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	session, ok := sessionFromRequest(w, r)
 	if !ok {
 		return
 	}
-	id := model.JobID(chi.URLParam(r, "jobID"))
+	id := model.JobTriggerID(chi.URLParam(r, "triggerID"))
 	if err := id.Validate(); err != nil {
 		writeError(ctx, w, http.StatusNotFound, errCodeNotFound)
 		return
 	}
-	if err := s.jobUC.Delete(ctx, session.Key(), id); err != nil {
-		errutil.Handle(ctx, err, "failed to delete job")
-		writeError(ctx, w, http.StatusInternalServerError, errCodeInternal)
+	if err := s.jobUC.DeleteTrigger(ctx, session.Key(), id); err != nil {
+		writeJobError(w, r, err, "failed to delete job trigger")
 		return
 	}
 	writeJSON(ctx, w, http.StatusOK, successResponse{Success: true})

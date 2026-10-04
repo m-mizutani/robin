@@ -1,8 +1,10 @@
 package hello_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -12,23 +14,17 @@ import (
 	"github.com/m-mizutani/robin/pkg/usecase"
 	"github.com/m-mizutani/robin/pkg/usecase/agents/hello"
 	"github.com/m-mizutani/robin/pkg/usecase/usecasetest"
+	"github.com/m-mizutani/robin/pkg/utils/logging"
 )
 
 var rate = model.Rate{Input: 2000, Output: 10000, CacheRead: 200, CacheWrite: 2500}
 
-func runRequest() usecase.JobRunRequest {
-	return usecase.JobRunRequest{
-		Key: model.UserKey{TeamID: "T0123", UserID: "U0ALICE"},
-		Job: model.Job{
-			TeamID:      "T0123",
-			UserID:      "U0ALICE",
-			ID:          "00000000-0000-4000-8000-000000000001",
-			Kind:        model.JobKindHello,
-			ChannelID:   "C0GENERAL",
-			ChannelName: "general",
-			Schedule:    model.DailySchedule{Hour: 9, Minute: 0, TimeZone: "Asia/Tokyo"},
-		},
-		RunID: "20261005T000000Z",
+func request() usecase.JobRequest {
+	return usecase.JobRequest{
+		Key:       model.UserKey{TeamID: "T0123", UserID: "U0ALICE"},
+		TriggerID: "00000000-0000-4000-8000-000000000001",
+		ChannelID: "C0GENERAL",
+		TimeZone:  "Asia/Tokyo",
 		// Monday 09:00 in Tokyo, still Sunday in UTC.
 		ScheduledAt: time.Date(2026, 10, 5, 0, 0, 0, 0, time.UTC),
 	}
@@ -36,7 +32,7 @@ func runRequest() usecase.JobRunRequest {
 
 func newAgent(t *testing.T, llm *usecasetest.LLM, bot *usecasetest.SlackBot) *hello.Agent {
 	t.Helper()
-	a, err := hello.New(llm, bot, hello.Config{Rate: rate})
+	a, err := hello.New(llm, bot, hello.Config{Rate: rate, MaxDelay: time.Hour})
 	gt.NoError(t, err).Required()
 	return a
 }
@@ -47,10 +43,10 @@ func TestAgent_PostsTheGreeting(t *testing.T) {
 	llm := &usecasetest.LLM{}
 	llm.Script(usecasetest.TextTurn("  Good morning, everyone! Happy Monday.\n", usage))
 	bot := usecasetest.NewSlackBot()
+	var buf bytes.Buffer
+	ctx := logging.With(context.Background(), slog.New(slog.NewJSONHandler(&buf, nil)))
 
-	res, err := newAgent(t, llm, bot).Run(context.Background(), runRequest())
-	gt.NoError(t, err).Required()
-	gt.Equal(t, res, &usecase.JobRunResult{MessageTS: "1900000000.000001", Spent: rate.Cost(usage)})
+	gt.NoError(t, newAgent(t, llm, bot).Run(ctx, request())).Required()
 
 	configs := llm.Configs()
 	gt.A(t, configs).Length(1).Required()
@@ -60,7 +56,7 @@ func TestAgent_PostsTheGreeting(t *testing.T) {
 
 	inputs := llm.Inputs()
 	gt.A(t, inputs).Length(1).Required()
-	gt.String(t, inputs[0].UserText).Equal("Date: 2026-10-05 (Monday)\nTime zone: Asia/Tokyo\nChannel: #general\nWrite the greeting.")
+	gt.String(t, inputs[0].UserText).Equal("Date: 2026-10-05 (Monday)\nTime zone: Asia/Tokyo\nWrite the greeting.")
 
 	gt.Equal(t, bot.Recorded(), []usecasetest.SlackCall{{
 		Method:    "PostMessage",
@@ -69,6 +65,7 @@ func TestAgent_PostsTheGreeting(t *testing.T) {
 		TS:        "1900000000.000001",
 		Text:      "Good morning, everyone! Happy Monday.",
 	}})
+	gt.String(t, buf.String()).Contains(`"spent_nano_usd":1000000`)
 }
 
 func TestAgent_ModelFailure(t *testing.T) {
@@ -77,9 +74,7 @@ func TestAgent_ModelFailure(t *testing.T) {
 	llm.Script(usecasetest.LLMStep{Err: llmErr})
 	bot := usecasetest.NewSlackBot()
 
-	res, err := newAgent(t, llm, bot).Run(context.Background(), runRequest())
-	gt.Error(t, err).Is(llmErr)
-	gt.Value(t, res).Nil()
+	gt.Error(t, newAgent(t, llm, bot).Run(context.Background(), request())).Is(llmErr)
 	gt.A(t, bot.Recorded()).Length(0)
 }
 
@@ -98,9 +93,7 @@ func TestAgent_NoGreeting(t *testing.T) {
 			llm.Script(usecasetest.LLMStep{Turn: turn})
 			bot := usecasetest.NewSlackBot()
 
-			res, err := newAgent(t, llm, bot).Run(context.Background(), runRequest())
-			gt.Error(t, err).Is(hello.ErrNoGreeting)
-			gt.Equal(t, res, &usecase.JobRunResult{Spent: rate.Cost(usage)})
+			gt.Error(t, newAgent(t, llm, bot).Run(context.Background(), request())).Is(hello.ErrNoGreeting)
 			gt.A(t, bot.Recorded()).Length(0)
 		})
 	}
@@ -112,24 +105,27 @@ func TestAgent_PostFailure(t *testing.T) {
 	bot := usecasetest.NewSlackBot()
 	bot.MessageErr = errors.New("not_in_channel")
 
-	res, err := newAgent(t, llm, bot).Run(context.Background(), runRequest())
-	gt.Error(t, err).Is(bot.MessageErr)
-	gt.Equal(t, res, &usecase.JobRunResult{Spent: rate.Cost(usage)})
+	gt.Error(t, newAgent(t, llm, bot).Run(context.Background(), request())).Is(bot.MessageErr)
 }
 
 func TestAgent_UnknownTimeZone(t *testing.T) {
 	llm := &usecasetest.LLM{}
 	bot := usecasetest.NewSlackBot()
-	req := runRequest()
-	req.Job.Schedule.TimeZone = "Mars/Base"
+	req := request()
+	req.TimeZone = "Mars/Base"
 
-	_, err := newAgent(t, llm, bot).Run(context.Background(), req)
-	gt.Value(t, err).NotNil()
+	gt.Error(t, newAgent(t, llm, bot).Run(context.Background(), req))
 	gt.A(t, llm.Configs()).Length(0)
 	gt.A(t, bot.Recorded()).Length(0)
 }
 
-func TestNew_RejectsInvalidRate(t *testing.T) {
-	_, err := hello.New(&usecasetest.LLM{}, usecasetest.NewSlackBot(), hello.Config{})
-	gt.Value(t, err).NotNil()
+func TestAgent_MaxDelay(t *testing.T) {
+	gt.Value(t, newAgent(t, &usecasetest.LLM{}, usecasetest.NewSlackBot()).MaxDelay()).Equal(time.Hour)
+}
+
+func TestNew_RejectsInvalidConfig(t *testing.T) {
+	_, err := hello.New(&usecasetest.LLM{}, usecasetest.NewSlackBot(), hello.Config{MaxDelay: time.Hour})
+	gt.Error(t, err)
+	_, err = hello.New(&usecasetest.LLM{}, usecasetest.NewSlackBot(), hello.Config{Rate: rate})
+	gt.Error(t, err)
 }

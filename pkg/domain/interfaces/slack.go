@@ -35,15 +35,6 @@ type SlackBot interface {
 	// DeleteMessage deletes a message Robin posted. It fails with
 	// ErrSlackMessageNotFound when the message no longer exists.
 	DeleteMessage(ctx context.Context, channelID, ts string) error
-	// GetChannel reads a channel with conversations.info. It fails with
-	// ErrSlackChannelNotFound when the channel does not exist or Robin cannot
-	// see it.
-	GetChannel(ctx context.Context, channelID string) (*model.SlackChannel, error)
-	// BotUserID returns the user ID of the bot (auth.test).
-	BotUserID(ctx context.Context) (model.SlackUserID, error)
-	// ChannelMembers reports which of users are members of the channel
-	// (conversations.members). It stops reading pages once all are found.
-	ChannelMembers(ctx context.Context, channelID string, users []model.SlackUserID) (map[model.SlackUserID]bool, error)
 	// PostMessage posts markdown to the channel itself, not in a thread,
 	// split as PostAnswer splits it, and returns the ts of the first message.
 	PostMessage(ctx context.Context, channelID string, requester model.SlackUserID, markdown string) (string, error)

@@ -24,483 +24,387 @@ var (
 	nextDay     = scheduledAt.Add(24 * time.Hour)
 )
 
-// fakeRunner records every request. Before returning it waits for release
-// when release is set, or until the context ends when waitCtx is set.
-type fakeRunner struct {
-	mu       sync.Mutex
-	requests []usecase.JobRunRequest
-	ctxErrs  []error // ctx.Err() of each call when it returned
-	result   *usecase.JobRunResult
+// fakeJob records every request. Before returning it waits for release when
+// release is set, or until the context ends when waitCtx is set.
+type fakeJob struct {
+	maxDelay time.Duration
 	err      error
 	release  chan struct{}
 	started  chan struct{}
 	waitCtx  bool
+
+	mu       sync.Mutex
+	requests []usecase.JobRequest
+	ctxErrs  []error // ctx.Err() of each call when it returned
 	running  atomic.Int32
 	maxSeen  atomic.Int32
 }
 
-func (r *fakeRunner) Run(ctx context.Context, req usecase.JobRunRequest) (*usecase.JobRunResult, error) {
-	n := r.running.Add(1)
-	defer r.running.Add(-1)
+func (j *fakeJob) MaxDelay() time.Duration { return j.maxDelay }
+
+func (j *fakeJob) Run(ctx context.Context, req usecase.JobRequest) error {
+	n := j.running.Add(1)
+	defer j.running.Add(-1)
 	for {
-		m := r.maxSeen.Load()
-		if n <= m || r.maxSeen.CompareAndSwap(m, n) {
+		m := j.maxSeen.Load()
+		if n <= m || j.maxSeen.CompareAndSwap(m, n) {
 			break
 		}
 	}
-	r.mu.Lock()
-	r.requests = append(r.requests, req)
-	r.mu.Unlock()
-	if r.started != nil {
-		r.started <- struct{}{}
+	j.mu.Lock()
+	j.requests = append(j.requests, req)
+	j.mu.Unlock()
+	if j.started != nil {
+		j.started <- struct{}{}
 	}
-	if r.release != nil {
-		<-r.release
+	if j.release != nil {
+		<-j.release
 	}
-	if r.waitCtx {
+	if j.waitCtx {
 		<-ctx.Done()
-		r.record(ctx)
-		return &usecase.JobRunResult{Spent: 7}, ctx.Err()
+	} else {
+		time.Sleep(5 * time.Millisecond)
 	}
-	time.Sleep(5 * time.Millisecond)
-	r.record(ctx)
-	return r.result, r.err
+	j.mu.Lock()
+	j.ctxErrs = append(j.ctxErrs, ctx.Err())
+	j.mu.Unlock()
+	if j.waitCtx {
+		return ctx.Err()
+	}
+	return j.err
 }
 
-func (r *fakeRunner) record(ctx context.Context) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.ctxErrs = append(r.ctxErrs, ctx.Err())
+func (j *fakeJob) calls() []usecase.JobRequest {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return append([]usecase.JobRequest(nil), j.requests...)
 }
 
-func (r *fakeRunner) calls() []usecase.JobRunRequest {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return append([]usecase.JobRunRequest(nil), r.requests...)
-}
-
-// jobHookRepo changes the answers of the job repository and records the
-// results the scheduler saved.
-type jobHookRepo struct {
+// hookRepo changes what ListDue and Update return.
+type hookRepo struct {
 	interfaces.Repository
-	jobs *jobHooks
+	settings *settingHooks
 }
 
-func (r *jobHookRepo) Job() interfaces.JobRepository { return r.jobs }
+func (r *hookRepo) JobSetting() interfaces.JobSettingRepository { return r.settings }
 
-type jobHooks struct {
-	interfaces.JobRepository
-	mu       sync.Mutex
-	finished []model.JobRun
-	// extra entries come first in every ListDue answer, as entries of
-	// earlier runs would, within the limit.
-	extra     []*model.JobScheduleEntry
-	listErr   error
-	finishErr error
+type settingHooks struct {
+	interfaces.JobSettingRepository
+	// extra entries come first in every ListDue answer.
+	extra   []*model.JobScheduleEntry
+	listErr error
+	// beforeUpdate runs before every Update; an error it returns is the
+	// result of that Update, which then writes nothing.
+	beforeUpdate func(ctx context.Context, key model.UserKey) error
 }
 
-func (h *jobHooks) ListDue(ctx context.Context, now time.Time, limit int) ([]*model.JobScheduleEntry, error) {
+func (h *settingHooks) Update(ctx context.Context, key model.UserKey, fn func(*model.JobSetting) (*model.JobSetting, error)) error {
+	if h.beforeUpdate != nil {
+		if err := h.beforeUpdate(ctx, key); err != nil {
+			return err
+		}
+	}
+	return h.JobSettingRepository.Update(ctx, key, fn)
+}
+
+func (h *settingHooks) ListDue(ctx context.Context, now time.Time) ([]*model.JobScheduleEntry, error) {
 	if h.listErr != nil {
 		return nil, h.listErr
 	}
-	entries, err := h.JobRepository.ListDue(ctx, now, limit)
-	if err != nil {
-		return nil, err
-	}
-	out := append(append([]*model.JobScheduleEntry(nil), h.extra...), entries...)
-	if len(out) > limit {
-		out = out[:limit]
-	}
-	return out, nil
-}
-
-func (h *jobHooks) Finish(ctx context.Context, key model.UserKey, run *model.JobRun) error {
-	h.mu.Lock()
-	h.finished = append(h.finished, *run)
-	h.mu.Unlock()
-	if h.finishErr != nil {
-		return h.finishErr
-	}
-	return h.JobRepository.Finish(ctx, key, run)
-}
-
-func (h *jobHooks) finishedRuns() []model.JobRun {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return append([]model.JobRun(nil), h.finished...)
+	entries, err := h.JobSettingRepository.ListDue(ctx, now)
+	return append(append([]*model.JobScheduleEntry(nil), h.extra...), entries...), err
 }
 
 type schedulerFixture struct {
-	mem    *memory.Memory
-	repo   *jobHookRepo
-	runner *fakeRunner
-	cfg    usecase.SchedulerConfig
-	owners int
+	mem   *memory.Memory
+	repo  *hookRepo
+	hello *fakeJob
+	cfg   usecase.SchedulerConfig
+	users int
 }
 
 func newSchedulerFixture(t *testing.T) *schedulerFixture {
 	t.Helper()
 	mem := memory.New()
 	return &schedulerFixture{
-		mem:    mem,
-		repo:   &jobHookRepo{Repository: mem, jobs: &jobHooks{JobRepository: mem.Job()}},
-		runner: &fakeRunner{result: &usecase.JobRunResult{MessageTS: "1900000000.000001", Spent: 1234}},
-		cfg: usecase.SchedulerConfig{
-			MaxDelay:    time.Hour,
-			RunTimeout:  5 * time.Second,
-			RunTTL:      720 * time.Hour,
-			Concurrency: 4,
-			BatchSize:   100,
-		},
+		mem:   mem,
+		repo:  &hookRepo{Repository: mem, settings: &settingHooks{JobSettingRepository: mem.JobSetting()}},
+		hello: &fakeJob{maxDelay: time.Hour},
+		cfg:   usecase.SchedulerConfig{RunTimeout: 5 * time.Second, Concurrency: 4},
 	}
 }
 
-// addJob stores a hello job of a new user due at nextRunAt.
-func (f *schedulerFixture) addJob(t *testing.T, nextRunAt time.Time) *model.Job {
+// addTrigger stores a setting of a new user with one trigger of job at 09:00
+// in Tokyo, due at nextRunAt.
+func (f *schedulerFixture) addTrigger(t *testing.T, job model.JobName, nextRunAt time.Time) (model.UserKey, model.JobTrigger) {
 	t.Helper()
-	f.owners++
-	job := &model.Job{
-		TeamID:      "T0123",
-		UserID:      model.SlackUserID(fmt.Sprintf("U%07d", f.owners)),
-		ID:          model.JobID(fmt.Sprintf("00000000-0000-4000-8000-%012d", f.owners)),
-		Kind:        model.JobKindHello,
-		ChannelID:   "C0GENERAL",
-		ChannelName: "general",
-		Schedule:    model.DailySchedule{Hour: 9, Minute: 0, TimeZone: "Asia/Tokyo"},
-		NextRunAt:   nextRunAt,
-		CreatedAt:   nextRunAt.Add(-48 * time.Hour),
-		UpdatedAt:   nextRunAt.Add(-48 * time.Hour),
+	f.users++
+	key := model.UserKey{TeamID: "T0123", UserID: model.SlackUserID(fmt.Sprintf("U%07d", f.users))}
+	tr := model.JobTrigger{
+		ID:        model.JobTriggerID(fmt.Sprintf("00000000-0000-4000-8000-%012d", f.users)),
+		Job:       job,
+		Time:      model.DailyTime{Hour: 9},
+		NextRunAt: nextRunAt,
 	}
-	gt.NoError(t, f.mem.Job().Create(context.Background(), job.Key(), job, 10)).Required()
-	return job
+	gt.NoError(t, f.mem.JobSetting().Update(context.Background(), key, func(*model.JobSetting) (*model.JobSetting, error) {
+		return &model.JobSetting{
+			TeamID: key.TeamID, UserID: key.UserID, ChannelID: "C0GENERAL", TimeZone: "Asia/Tokyo",
+			Triggers: []model.JobTrigger{tr}, CreatedAt: nextRunAt, UpdatedAt: nextRunAt,
+		}, nil
+	})).Required()
+	return key, tr
 }
 
 func (f *schedulerFixture) scheduler(t *testing.T, now time.Time) *usecase.Scheduler {
 	t.Helper()
-	s, err := usecase.NewScheduler(f.repo, map[model.JobKind]usecase.JobRunner{model.JobKindHello: f.runner}, f.cfg)
+	s, err := usecase.NewScheduler(f.repo, map[model.JobName]usecase.Job{model.JobNameHello: f.hello}, f.cfg)
 	gt.NoError(t, err).Required()
 	s.SetNowForTest(func() time.Time { return now })
 	return s
 }
 
-func (f *schedulerFixture) stored(t *testing.T, job *model.Job) *model.Job {
+func (f *schedulerFixture) nextRun(t *testing.T, key model.UserKey, id model.JobTriggerID) time.Time {
 	t.Helper()
-	got, err := f.mem.Job().Get(context.Background(), job.Key(), job.ID)
+	s, err := f.mem.JobSetting().Get(context.Background(), key)
 	gt.NoError(t, err).Required()
-	return got
+	tr := s.Trigger(id)
+	gt.Value(t, tr).NotNil().Required()
+	return tr.NextRunAt
 }
 
-func TestScheduler_RunsADueJob(t *testing.T) {
+func TestScheduler_RunsADueTrigger(t *testing.T) {
 	f := newSchedulerFixture(t)
-	job := f.addJob(t, scheduledAt)
-	now := scheduledAt.Add(3 * time.Minute)
+	key, tr := f.addTrigger(t, model.JobNameHello, scheduledAt)
 
-	report, err := f.scheduler(t, now).RunDue(context.Background())
-	gt.NoError(t, err).Required()
-	gt.Equal(t, report, &usecase.SchedulerReport{Succeeded: 1})
+	gt.NoError(t, f.scheduler(t, scheduledAt.Add(3*time.Minute)).RunDue(context.Background())).Required()
 
-	calls := f.runner.calls()
-	gt.A(t, calls).Length(1).Required()
-	gt.Value(t, calls[0].Key).Equal(job.Key())
-	gt.Value(t, calls[0].Job.ID).Equal(job.ID)
-	gt.Value(t, calls[0].Job.ChannelID).Equal("C0GENERAL")
-	gt.True(t, calls[0].ScheduledAt.Equal(scheduledAt))
-	gt.Value(t, calls[0].RunID).Equal(model.JobRunID("20261005T000000Z"))
-
-	runs := f.repo.jobs.finishedRuns()
-	gt.A(t, runs).Length(1).Required()
-	gt.Value(t, runs[0].Status).Equal(model.JobRunSucceeded)
-	gt.Value(t, runs[0].Failure).Equal(model.JobRunNoFailure)
-	gt.String(t, runs[0].MessageTS).Equal("1900000000.000001")
-	gt.Value(t, runs[0].Spent).Equal(model.NanoUSD(1234))
-	gt.True(t, runs[0].StartedAt.Equal(now))
-	gt.True(t, runs[0].Deadline.Equal(now.Add(5*time.Second)))
-	gt.True(t, runs[0].ExpiresAt.Equal(now.Add(720*time.Hour)))
-
-	got := f.stored(t, job)
-	gt.True(t, got.NextRunAt.Equal(nextDay))
-	gt.Value(t, got.LastRun.Status).Equal(model.JobRunSucceeded)
-	gt.Value(t, got.LastRun.RunID).Equal(model.JobRunID("20261005T000000Z"))
+	gt.Equal(t, f.hello.calls(), []usecase.JobRequest{{
+		Key: key, TriggerID: tr.ID, ChannelID: "C0GENERAL", TimeZone: "Asia/Tokyo", ScheduledAt: scheduledAt,
+	}})
+	gt.True(t, f.nextRun(t, key, tr.ID).Equal(nextDay))
 }
 
-func TestScheduler_LeavesAJobThatIsNotDue(t *testing.T) {
+func TestScheduler_LeavesATriggerThatIsNotDue(t *testing.T) {
 	f := newSchedulerFixture(t)
-	job := f.addJob(t, scheduledAt)
+	key, tr := f.addTrigger(t, model.JobNameHello, scheduledAt)
 
-	report, err := f.scheduler(t, scheduledAt.Add(-time.Minute)).RunDue(context.Background())
-	gt.NoError(t, err).Required()
-	gt.Equal(t, report, &usecase.SchedulerReport{})
-	gt.A(t, f.runner.calls()).Length(0)
-	got := f.stored(t, job)
-	gt.True(t, got.NextRunAt.Equal(scheduledAt))
-	gt.Value(t, got.LastRun).Nil()
+	gt.NoError(t, f.scheduler(t, scheduledAt.Add(-time.Minute)).RunDue(context.Background())).Required()
+	gt.A(t, f.hello.calls()).Length(0)
+	gt.True(t, f.nextRun(t, key, tr.ID).Equal(scheduledAt))
 }
 
-func TestScheduler_SkipsALateRun(t *testing.T) {
+func TestScheduler_LateRunsFollowTheJob(t *testing.T) {
 	cases := map[string]struct {
+		maxDelay time.Duration
 		now      time.Time
-		skipped  bool
+		runs     bool
 		wantNext time.Time
 	}{
-		"61 minutes late": {now: scheduledAt.Add(61 * time.Minute), skipped: true, wantNext: nextDay},
-		"59 minutes late": {now: scheduledAt.Add(59 * time.Minute), skipped: false, wantNext: nextDay},
-		"three days late": {now: scheduledAt.Add(72*time.Hour + time.Minute), skipped: true, wantNext: scheduledAt.Add(96 * time.Hour)},
+		"61 minutes late for a job that allows 1 hour": {time.Hour, scheduledAt.Add(61 * time.Minute), false, nextDay},
+		"59 minutes late for a job that allows 1 hour": {time.Hour, scheduledAt.Add(59 * time.Minute), true, nextDay},
+		"three days late for a job without a limit":    {0, scheduledAt.Add(72*time.Hour + time.Minute), true, scheduledAt.Add(96 * time.Hour)},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
 			f := newSchedulerFixture(t)
-			job := f.addJob(t, scheduledAt)
+			f.hello.maxDelay = c.maxDelay
+			key, tr := f.addTrigger(t, model.JobNameHello, scheduledAt)
 
-			report, err := f.scheduler(t, c.now).RunDue(context.Background())
-			gt.NoError(t, err).Required()
-			got := f.stored(t, job)
-			gt.True(t, got.NextRunAt.Equal(c.wantNext))
-			if c.skipped {
-				gt.Equal(t, report, &usecase.SchedulerReport{Skipped: 1})
-				gt.A(t, f.runner.calls()).Length(0)
-				gt.Value(t, got.LastRun.Status).Equal(model.JobRunSkipped)
-				gt.True(t, got.LastRun.ScheduledAt.Equal(scheduledAt))
-				return
+			gt.NoError(t, f.scheduler(t, c.now).RunDue(context.Background())).Required()
+			if c.runs {
+				gt.A(t, f.hello.calls()).Length(1)
+			} else {
+				gt.A(t, f.hello.calls()).Length(0)
 			}
-			gt.Equal(t, report, &usecase.SchedulerReport{Succeeded: 1})
-			gt.A(t, f.runner.calls()).Length(1)
+			gt.True(t, f.nextRun(t, key, tr.ID).Equal(c.wantNext))
 		})
 	}
 }
 
-func TestScheduler_RecordsRunnerFailures(t *testing.T) {
-	t.Run("runner error keeps the spending", func(t *testing.T) {
-		f := newSchedulerFixture(t)
-		job := f.addJob(t, scheduledAt)
-		f.runner.result = &usecase.JobRunResult{Spent: 99}
-		f.runner.err = errors.New("slack is down")
+func TestScheduler_TriggerOfAnUndefinedJob(t *testing.T) {
+	f := newSchedulerFixture(t)
+	futureKey, future := f.addTrigger(t, "future_job", scheduledAt)
+	helloKey, hello := f.addTrigger(t, model.JobNameHello, scheduledAt)
 
-		report, err := f.scheduler(t, scheduledAt.Add(time.Minute)).RunDue(context.Background())
-		gt.NoError(t, err).Required()
-		gt.Equal(t, report, &usecase.SchedulerReport{Failed: 1})
-		runs := f.repo.jobs.finishedRuns()
-		gt.A(t, runs).Length(1).Required()
-		gt.Value(t, runs[0].Status).Equal(model.JobRunFailed)
-		gt.Value(t, runs[0].Failure).Equal(model.JobRunRunFailed)
-		gt.Value(t, runs[0].Spent).Equal(model.NanoUSD(99))
-		gt.Value(t, f.stored(t, job).LastRun.Failure).Equal(model.JobRunRunFailed)
+	gt.NoError(t, f.scheduler(t, scheduledAt.Add(time.Minute)).RunDue(context.Background())).Required()
+	calls := f.hello.calls()
+	gt.A(t, calls).Length(1).Required()
+	gt.Value(t, calls[0].TriggerID).Equal(hello.ID)
+	gt.True(t, f.nextRun(t, futureKey, future.ID).Equal(nextDay))
+	gt.True(t, f.nextRun(t, helloKey, hello.ID).Equal(nextDay))
+}
+
+func TestScheduler_FailedRunsAreNotRetried(t *testing.T) {
+	t.Run("job error", func(t *testing.T) {
+		f := newSchedulerFixture(t)
+		f.hello.err = errors.New("slack is down")
+		key, tr := f.addTrigger(t, model.JobNameHello, scheduledAt)
+
+		gt.NoError(t, f.scheduler(t, scheduledAt.Add(time.Minute)).RunDue(context.Background())).Required()
+		gt.NoError(t, f.scheduler(t, scheduledAt.Add(2*time.Minute)).RunDue(context.Background())).Required()
+		gt.A(t, f.hello.calls()).Length(1)
+		gt.True(t, f.nextRun(t, key, tr.ID).Equal(nextDay))
 	})
 
-	t.Run("runner over the time limit", func(t *testing.T) {
+	t.Run("over the time limit", func(t *testing.T) {
 		f := newSchedulerFixture(t)
-		f.addJob(t, scheduledAt)
 		f.cfg.RunTimeout = 50 * time.Millisecond
-		f.runner.waitCtx = true
+		f.hello.waitCtx = true
+		f.addTrigger(t, model.JobNameHello, scheduledAt)
 
-		report, err := f.scheduler(t, scheduledAt.Add(time.Minute)).RunDue(context.Background())
-		gt.NoError(t, err).Required()
-		gt.Equal(t, report, &usecase.SchedulerReport{Failed: 1})
-		runs := f.repo.jobs.finishedRuns()
-		gt.A(t, runs).Length(1).Required()
-		gt.Value(t, runs[0].Failure).Equal(model.JobRunTimedOut)
-		gt.Value(t, runs[0].Spent).Equal(model.NanoUSD(7))
+		gt.NoError(t, f.scheduler(t, scheduledAt.Add(time.Minute)).RunDue(context.Background())).Required()
+		gt.A(t, f.hello.calls()).Length(1)
+		gt.Bool(t, errors.Is(f.hello.ctxErrs[0], context.DeadlineExceeded)).True()
 	})
 }
 
-// The message was posted but its result could not be saved: the job keeps
-// the run as running, which the settings page shows as unrecorded once the
-// deadline passes. The run is not retried.
-func TestScheduler_ResultNotSaved(t *testing.T) {
+func TestScheduler_TwoSchedulersRunATriggerOnce(t *testing.T) {
 	f := newSchedulerFixture(t)
-	job := f.addJob(t, scheduledAt)
-	f.repo.jobs.finishErr = errors.New("firestore unavailable")
-
-	report, err := f.scheduler(t, scheduledAt.Add(time.Minute)).RunDue(context.Background())
-	gt.NoError(t, err).Required()
-	gt.Equal(t, report, &usecase.SchedulerReport{Succeeded: 1})
-
-	got := f.stored(t, job)
-	gt.Value(t, got.LastRun.Status).Equal(model.JobRunRunning)
-	gt.True(t, got.NextRunAt.Equal(nextDay))
-
-	report, err = f.scheduler(t, scheduledAt.Add(2*time.Minute)).RunDue(context.Background())
-	gt.NoError(t, err).Required()
-	gt.Equal(t, report, &usecase.SchedulerReport{})
-	gt.A(t, f.runner.calls()).Length(1)
-}
-
-func TestScheduler_JobKindWithoutRunner(t *testing.T) {
-	f := newSchedulerFixture(t)
-	job := f.addJob(t, scheduledAt)
-	s, err := usecase.NewScheduler(f.repo, map[model.JobKind]usecase.JobRunner{}, f.cfg)
-	gt.NoError(t, err).Required()
-	s.SetNowForTest(func() time.Time { return scheduledAt.Add(time.Minute) })
-
-	report, err := s.RunDue(context.Background())
-	gt.NoError(t, err).Required()
-	gt.Equal(t, report, &usecase.SchedulerReport{Failed: 1})
-	got := f.stored(t, job)
-	gt.True(t, got.NextRunAt.Equal(nextDay))
-	gt.Value(t, got.LastRun.Status).Equal(model.JobRunFailed)
-	gt.Value(t, got.LastRun.Failure).Equal(model.JobRunNoRunner)
-}
-
-func TestScheduler_TwoSchedulersRunAJobOnce(t *testing.T) {
-	f := newSchedulerFixture(t)
-	f.addJob(t, scheduledAt)
+	f.addTrigger(t, model.JobNameHello, scheduledAt)
 	now := scheduledAt.Add(time.Minute)
 	a, b := f.scheduler(t, now), f.scheduler(t, now)
 
 	var wg sync.WaitGroup
-	reports := make([]*usecase.SchedulerReport, 2)
-	for i, s := range []*usecase.Scheduler{a, b} {
+	for _, s := range []*usecase.Scheduler{a, b} {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			r, err := s.RunDue(context.Background())
-			gt.NoError(t, err)
-			reports[i] = r
+			gt.NoError(t, s.RunDue(context.Background()))
 		}()
 	}
 	wg.Wait()
-	gt.A(t, f.runner.calls()).Length(1)
-	gt.Number(t, reports[0].Succeeded+reports[1].Succeeded).Equal(1)
+	gt.A(t, f.hello.calls()).Length(1)
 }
 
-func TestScheduler_DoesNotClaimAJobAnotherProcessMoved(t *testing.T) {
-	f := newSchedulerFixture(t)
-	job := f.addJob(t, scheduledAt)
-	now := scheduledAt.Add(time.Minute)
-	_, err := f.scheduler(t, now).RunDue(context.Background())
-	gt.NoError(t, err).Required()
+func TestScheduler_StaleEntries(t *testing.T) {
+	t.Run("another process moved the trigger after listing", func(t *testing.T) {
+		f := newSchedulerFixture(t)
+		key, tr := f.addTrigger(t, model.JobNameHello, scheduledAt)
+		now := scheduledAt.Add(time.Minute)
+		gt.NoError(t, f.scheduler(t, now).RunDue(context.Background())).Required()
 
-	// The second scheduler read the entry before the first one claimed it.
-	f.repo.jobs.extra = []*model.JobScheduleEntry{{TeamID: job.TeamID, UserID: job.UserID, JobID: job.ID, NextRunAt: scheduledAt}}
-	report, err := f.scheduler(t, now).RunDue(context.Background())
-	gt.NoError(t, err).Required()
-	gt.Equal(t, report, &usecase.SchedulerReport{NotClaimed: 1})
-	gt.A(t, f.runner.calls()).Length(1)
-	gt.True(t, f.stored(t, job).NextRunAt.Equal(nextDay))
+		f.repo.settings.extra = []*model.JobScheduleEntry{{TeamID: key.TeamID, UserID: key.UserID, TriggerID: tr.ID, NextRunAt: scheduledAt}}
+		gt.NoError(t, f.scheduler(t, now).RunDue(context.Background())).Required()
+		gt.A(t, f.hello.calls()).Length(1)
+		gt.True(t, f.nextRun(t, key, tr.ID).Equal(nextDay))
+	})
+
+	t.Run("the trigger was deleted", func(t *testing.T) {
+		f := newSchedulerFixture(t)
+		key, _ := f.addTrigger(t, model.JobNameHello, scheduledAt)
+		f.repo.settings.extra = []*model.JobScheduleEntry{
+			{TeamID: key.TeamID, UserID: key.UserID, TriggerID: "00000000-0000-4000-8000-999999999999", NextRunAt: scheduledAt},
+			{TeamID: "T0123", UserID: "U0GHOST", TriggerID: "00000000-0000-4000-8000-999999999998", NextRunAt: scheduledAt},
+		}
+		gt.NoError(t, f.scheduler(t, scheduledAt.Add(time.Minute)).RunDue(context.Background())).Required()
+		gt.A(t, f.hello.calls()).Length(1)
+	})
 }
 
 func TestScheduler_LimitsConcurrentRuns(t *testing.T) {
 	f := newSchedulerFixture(t)
 	f.cfg.Concurrency = 2
 	for i := 0; i < 5; i++ {
-		f.addJob(t, scheduledAt)
+		f.addTrigger(t, model.JobNameHello, scheduledAt)
 	}
 
-	report, err := f.scheduler(t, scheduledAt.Add(time.Minute)).RunDue(context.Background())
-	gt.NoError(t, err).Required()
-	gt.Equal(t, report, &usecase.SchedulerReport{Succeeded: 5})
-	gt.Bool(t, f.runner.maxSeen.Load() <= 2).True()
-	gt.Number(t, f.runner.running.Load()).Equal(0)
-}
-
-func TestScheduler_ReadsEntriesInBatches(t *testing.T) {
-	f := newSchedulerFixture(t)
-	f.cfg.BatchSize = 2
-	var jobs []*model.Job
-	for i := 0; i < 5; i++ {
-		jobs = append(jobs, f.addJob(t, scheduledAt))
-	}
-
-	report, err := f.scheduler(t, scheduledAt.Add(time.Minute)).RunDue(context.Background())
-	gt.NoError(t, err).Required()
-	gt.Equal(t, report, &usecase.SchedulerReport{Succeeded: 5})
-	for _, j := range jobs {
-		gt.True(t, f.stored(t, j).NextRunAt.Equal(nextDay))
-	}
-}
-
-func TestScheduler_SkipsAnEntryWithoutAJob(t *testing.T) {
-	f := newSchedulerFixture(t)
-	job := f.addJob(t, scheduledAt)
-	// The entry stays due on every read; the scheduler handles it once.
-	f.repo.jobs.extra = []*model.JobScheduleEntry{{
-		TeamID: "T0123", UserID: "U0GHOST", JobID: "00000000-0000-4000-8000-999999999999", NextRunAt: scheduledAt,
-	}}
-
-	report, err := f.scheduler(t, scheduledAt.Add(time.Minute)).RunDue(context.Background())
-	gt.NoError(t, err).Required()
-	gt.Equal(t, report, &usecase.SchedulerReport{Succeeded: 1, Errors: 1})
-	gt.True(t, f.stored(t, job).NextRunAt.Equal(nextDay))
-}
-
-// Entries that stay due after a failure fill the first batch; the jobs after
-// them still run.
-func TestScheduler_FailedEntriesDoNotHideLaterJobs(t *testing.T) {
-	f := newSchedulerFixture(t)
-	f.cfg.BatchSize = 2
-	job := f.addJob(t, scheduledAt)
-	f.repo.jobs.extra = []*model.JobScheduleEntry{
-		{TeamID: "T0123", UserID: "U0GHOST", JobID: "00000000-0000-4000-8000-999999999998", NextRunAt: scheduledAt.Add(-time.Hour)},
-		{TeamID: "T0123", UserID: "U0GHOST", JobID: "00000000-0000-4000-8000-999999999999", NextRunAt: scheduledAt.Add(-time.Hour)},
-	}
-
-	report, err := f.scheduler(t, scheduledAt.Add(time.Minute)).RunDue(context.Background())
-	gt.NoError(t, err).Required()
-	gt.Equal(t, report, &usecase.SchedulerReport{Succeeded: 1, Errors: 2})
-	gt.True(t, f.stored(t, job).NextRunAt.Equal(nextDay))
+	gt.NoError(t, f.scheduler(t, scheduledAt.Add(time.Minute)).RunDue(context.Background())).Required()
+	gt.A(t, f.hello.calls()).Length(5)
+	gt.Bool(t, f.hello.maxSeen.Load() <= 2).True()
+	gt.Number(t, f.hello.running.Load()).Equal(0)
 }
 
 func TestScheduler_ListFailure(t *testing.T) {
 	f := newSchedulerFixture(t)
-	f.addJob(t, scheduledAt)
+	f.addTrigger(t, model.JobNameHello, scheduledAt)
 	listErr := errors.New("firestore is unavailable")
-	f.repo.jobs.listErr = listErr
+	f.repo.settings.listErr = listErr
 
-	report, err := f.scheduler(t, scheduledAt.Add(time.Minute)).RunDue(context.Background())
-	gt.Error(t, err).Is(listErr)
-	gt.Equal(t, report, &usecase.SchedulerReport{})
-	gt.A(t, f.runner.calls()).Length(0)
+	gt.Error(t, f.scheduler(t, scheduledAt.Add(time.Minute)).RunDue(context.Background())).Is(listErr)
+	gt.A(t, f.hello.calls()).Length(0)
 }
 
 func TestScheduler_CancellationStopsClaimsButNotRuns(t *testing.T) {
 	f := newSchedulerFixture(t)
 	f.cfg.Concurrency = 1
-	var jobs []*model.Job
-	for i := 0; i < 3; i++ {
-		jobs = append(jobs, f.addJob(t, scheduledAt))
+	type owned struct {
+		key model.UserKey
+		tr  model.JobTrigger
 	}
-	f.runner.release = make(chan struct{})
-	f.runner.started = make(chan struct{}, 3)
+	var triggers []owned
+	for i := 0; i < 3; i++ {
+		key, tr := f.addTrigger(t, model.JobNameHello, scheduledAt)
+		triggers = append(triggers, owned{key, tr})
+	}
+	f.hello.release = make(chan struct{})
+	f.hello.started = make(chan struct{}, 3)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	type result struct {
-		report *usecase.SchedulerReport
-		err    error
-	}
-	done := make(chan result, 1)
-	go func() {
-		r, err := f.scheduler(t, scheduledAt.Add(time.Minute)).RunDue(ctx)
-		done <- result{r, err}
-	}()
+	done := make(chan error, 1)
+	go func() { done <- f.scheduler(t, scheduledAt.Add(time.Minute)).RunDue(ctx) }()
 
-	<-f.runner.started
+	<-f.hello.started
 	cancel()
 	select {
 	case <-done:
 		t.Fatal("RunDue returned before the claimed run finished")
 	case <-time.After(50 * time.Millisecond):
 	}
-	close(f.runner.release)
-	res := <-done
+	close(f.hello.release)
 
-	gt.Error(t, res.err).Is(context.Canceled)
-	gt.Equal(t, res.report, &usecase.SchedulerReport{Succeeded: 1})
-	gt.A(t, f.runner.calls()).Length(1).Required()
+	gt.Error(t, <-done).Is(context.Canceled)
+	gt.A(t, f.hello.calls()).Length(1)
 	// The run kept its context after the caller's was cancelled.
-	gt.Value(t, f.runner.ctxErrs[0]).Nil()
-
+	gt.Value(t, f.hello.ctxErrs[0]).Nil()
 	moved := 0
-	for _, j := range jobs {
-		if f.stored(t, j).NextRunAt.Equal(nextDay) {
+	for _, o := range triggers {
+		if f.nextRun(t, o.key, o.tr.ID).Equal(nextDay) {
 			moved++
 		}
 	}
 	gt.Number(t, moved).Equal(1)
 }
 
+func TestScheduler_CancellationDuringTheLastClaim(t *testing.T) {
+	f := newSchedulerFixture(t)
+	key, tr := f.addTrigger(t, model.JobNameHello, scheduledAt)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.repo.settings.beforeUpdate = func(ctx context.Context, _ model.UserKey) error {
+		cancel()
+		return ctx.Err()
+	}
+
+	gt.Error(t, f.scheduler(t, scheduledAt.Add(time.Minute)).RunDue(ctx)).Is(context.Canceled)
+	gt.A(t, f.hello.calls()).Length(0)
+	gt.True(t, f.nextRun(t, key, tr.ID).Equal(scheduledAt))
+}
+
+func TestScheduler_ClaimFailure(t *testing.T) {
+	f := newSchedulerFixture(t)
+	failedKey, failed := f.addTrigger(t, model.JobNameHello, scheduledAt)
+	okKey, ok := f.addTrigger(t, model.JobNameHello, scheduledAt)
+	claimErr := errors.New("firestore is unavailable")
+	f.repo.settings.beforeUpdate = func(_ context.Context, key model.UserKey) error {
+		if key == failedKey {
+			return claimErr
+		}
+		return nil
+	}
+
+	gt.Error(t, f.scheduler(t, scheduledAt.Add(time.Minute)).RunDue(context.Background())).Is(claimErr)
+	// The trigger that could not be claimed does not stop the other one.
+	calls := f.hello.calls()
+	gt.A(t, calls).Length(1).Required()
+	gt.Value(t, calls[0].TriggerID).Equal(ok.ID)
+	gt.True(t, f.nextRun(t, okKey, ok.ID).Equal(nextDay))
+	gt.True(t, f.nextRun(t, failedKey, failed.ID).Equal(scheduledAt))
+}
+
 func TestScheduler_DoesNotWaitForOtherBackgroundWork(t *testing.T) {
 	f := newSchedulerFixture(t)
-	f.addJob(t, scheduledAt)
+	f.addTrigger(t, model.JobNameHello, scheduledAt)
 
 	release := make(chan struct{})
 	async.Dispatch(context.Background(), func(_ context.Context) error {
@@ -512,39 +416,31 @@ func TestScheduler_DoesNotWaitForOtherBackgroundWork(t *testing.T) {
 		async.Wait()
 	})
 
-	done := make(chan struct{})
-	go func() {
-		_, err := f.scheduler(t, scheduledAt.Add(time.Minute)).RunDue(context.Background())
-		gt.NoError(t, err)
-		close(done)
-	}()
+	done := make(chan error, 1)
+	go func() { done <- f.scheduler(t, scheduledAt.Add(time.Minute)).RunDue(context.Background()) }()
 	select {
-	case <-done:
+	case err := <-done:
+		gt.NoError(t, err)
 	case <-time.After(5 * time.Second):
 		t.Fatal("RunDue waited for background work it did not start")
 	}
-	gt.A(t, f.runner.calls()).Length(1)
+	gt.A(t, f.hello.calls()).Length(1)
 }
 
 func TestNewScheduler_RejectsInvalidConfig(t *testing.T) {
-	valid := usecase.SchedulerConfig{MaxDelay: time.Hour, RunTimeout: time.Minute, RunTTL: time.Hour, Concurrency: 1, BatchSize: 1}
+	valid := usecase.SchedulerConfig{RunTimeout: time.Minute, Concurrency: 1}
 	_, err := usecase.NewScheduler(memory.New(), nil, valid)
 	gt.NoError(t, err)
 
-	for name, mutate := range map[string]func(c *usecase.SchedulerConfig){
-		"no max delay":      func(c *usecase.SchedulerConfig) { c.MaxDelay = 0 },
-		"no run timeout":    func(c *usecase.SchedulerConfig) { c.RunTimeout = 0 },
-		"ttl below timeout": func(c *usecase.SchedulerConfig) { c.RunTTL = time.Second },
-		"no concurrency":    func(c *usecase.SchedulerConfig) { c.Concurrency = 0 },
-		"no batch size":     func(c *usecase.SchedulerConfig) { c.BatchSize = 0 },
+	for name, c := range map[string]usecase.SchedulerConfig{
+		"no run timeout": {Concurrency: 1},
+		"no concurrency": {RunTimeout: time.Minute},
 	} {
 		t.Run(name, func(t *testing.T) {
-			c := valid
-			mutate(&c)
 			_, err := usecase.NewScheduler(memory.New(), nil, c)
 			gt.Error(t, err)
 		})
 	}
-	_, err = usecase.NewScheduler(memory.New(), map[model.JobKind]usecase.JobRunner{model.JobKindHello: nil}, valid)
+	_, err = usecase.NewScheduler(memory.New(), map[model.JobName]usecase.Job{model.JobNameHello: nil}, valid)
 	gt.Error(t, err)
 }

@@ -1,19 +1,13 @@
 package config
 
 import (
-	"net/url"
-
 	"github.com/m-mizutani/goerr/v2"
-	"github.com/slack-go/slack"
 	"github.com/urfave/cli/v3"
 
 	slackadapter "github.com/m-mizutani/robin/pkg/adapter/slack"
 	"github.com/m-mizutani/robin/pkg/domain/interfaces"
 	"github.com/m-mizutani/robin/pkg/domain/model"
 )
-
-// defaultSlackAPIURL is the Web API base URL of slack-go.
-const defaultSlackAPIURL = slack.APIURL
 
 // SlackApp holds the settings of signing in with Slack and receiving its
 // events: the OAuth client, the signing secret and the workspace.
@@ -98,11 +92,10 @@ func (x *SlackApp) ClientSecret() string      { return x.clientSecret }
 func (x *SlackApp) SigningSecret() string     { return x.signingSecret }
 func (x *SlackApp) TeamID() model.SlackTeamID { return model.SlackTeamID(x.teamID) }
 
-// SlackBot holds the bot token and the Web API the bot calls. Every command
-// that posts as Robin builds its bot here.
+// SlackBot holds the bot token. Every command that posts as Robin builds its
+// bot here.
 type SlackBot struct {
 	botToken string
-	apiURL   string
 }
 
 func (x *SlackBot) Flags() []cli.Flag {
@@ -114,29 +107,13 @@ func (x *SlackBot) Flags() []cli.Flag {
 			Sources:     cli.EnvVars("ROBIN_SLACK_BOT_TOKEN"),
 			Destination: &x.botToken,
 		},
-		&cli.StringFlag{
-			Name:        "slack-api-url",
-			Category:    "Development",
-			Usage:       "Base URL of the Slack Web API the bot calls. Values other than the default are accepted only with --no-auth",
-			Value:       defaultSlackAPIURL,
-			Sources:     cli.EnvVars("ROBIN_SLACK_API_URL"),
-			Destination: &x.apiURL,
-		},
 	}
 }
 
-// Validate checks --slack-api-url: an http(s) URL, and other than the default
-// only when noAuth is true. required makes the bot token mandatory.
-func (x *SlackBot) Validate(required, noAuth bool) error {
+// Validate makes the bot token mandatory when required.
+func (x *SlackBot) Validate(required bool) error {
 	if required && x.botToken == "" {
 		return goerr.New("--slack-bot-token is required")
-	}
-	u, err := url.Parse(x.apiURL)
-	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
-		return goerr.New("invalid --slack-api-url", goerr.V("slack_api_url", x.apiURL))
-	}
-	if x.apiURL != defaultSlackAPIURL && !noAuth {
-		return goerr.New("--slack-api-url can be changed only with --no-auth", goerr.V("slack_api_url", x.apiURL))
 	}
 	return nil
 }
@@ -149,5 +126,5 @@ func (x *SlackBot) Configure() interfaces.SlackBot {
 	if !x.Enabled() {
 		return nil
 	}
-	return slackadapter.NewBot(x.botToken, slack.OptionAPIURL(x.apiURL))
+	return slackadapter.NewBot(x.botToken)
 }

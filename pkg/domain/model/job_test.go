@@ -16,259 +16,143 @@ func mustLoad(t *testing.T, name string) *time.Location {
 	return loc
 }
 
-func TestDailySchedule_Next(t *testing.T) {
+func TestDailyTime_Next(t *testing.T) {
 	tokyo := mustLoad(t, "Asia/Tokyo")
-	s := model.DailySchedule{Hour: 9, Minute: 0, TimeZone: "Asia/Tokyo"}
+	at := model.DailyTime{Hour: 9, Minute: 0}
 
 	cases := map[string]struct {
 		after time.Time
 		want  time.Time
 	}{
-		"before the time on the same day": {
-			after: time.Date(2026, 10, 5, 8, 59, 0, 0, tokyo),
-			want:  time.Date(2026, 10, 5, 9, 0, 0, 0, tokyo),
-		},
-		"exactly at the time": {
-			after: time.Date(2026, 10, 5, 9, 0, 0, 0, tokyo),
-			want:  time.Date(2026, 10, 6, 9, 0, 0, 0, tokyo),
-		},
-		"after the time": {
-			after: time.Date(2026, 10, 5, 9, 1, 0, 0, tokyo),
-			want:  time.Date(2026, 10, 6, 9, 0, 0, 0, tokyo),
-		},
-		"across the end of a year": {
-			after: time.Date(2026, 12, 31, 9, 30, 0, 0, tokyo),
-			want:  time.Date(2027, 1, 1, 9, 0, 0, 0, tokyo),
-		},
-		"after given in UTC": {
-			after: time.Date(2026, 10, 4, 23, 30, 0, 0, time.UTC),
-			want:  time.Date(2026, 10, 5, 0, 0, 0, 0, time.UTC),
-		},
+		"before the time on the same day": {time.Date(2026, 10, 5, 8, 59, 0, 0, tokyo), time.Date(2026, 10, 5, 9, 0, 0, 0, tokyo)},
+		"exactly at the time":             {time.Date(2026, 10, 5, 9, 0, 0, 0, tokyo), time.Date(2026, 10, 6, 9, 0, 0, 0, tokyo)},
+		"after the time":                  {time.Date(2026, 10, 5, 9, 1, 0, 0, tokyo), time.Date(2026, 10, 6, 9, 0, 0, 0, tokyo)},
+		"across the end of a year":        {time.Date(2026, 12, 31, 9, 30, 0, 0, tokyo), time.Date(2027, 1, 1, 9, 0, 0, 0, tokyo)},
+		"after given in UTC":              {time.Date(2026, 10, 4, 23, 30, 0, 0, time.UTC), time.Date(2026, 10, 5, 0, 0, 0, 0, time.UTC)},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
-			got, err := s.Next(c.after)
-			gt.NoError(t, err).Required()
+			got := at.Next(c.after, tokyo)
 			gt.True(t, got.Equal(c.want))
 			gt.Equal(t, got.Location(), time.UTC)
 		})
 	}
 }
 
-func TestDailySchedule_NextDaylightSaving(t *testing.T) {
+func TestDailyTime_NextDaylightSaving(t *testing.T) {
 	ny := mustLoad(t, "America/New_York")
-	s := model.DailySchedule{Hour: 2, Minute: 30, TimeZone: "America/New_York"}
+	at := model.DailyTime{Hour: 2, Minute: 30}
 
 	// 02:30 does not exist on 2027-03-14; time.Date gives 06:30 UTC (01:30
 	// EST), and the day after is back to 02:30 EDT.
-	got, err := s.Next(time.Date(2027, 3, 13, 12, 0, 0, 0, ny))
-	gt.NoError(t, err).Required()
+	got := at.Next(time.Date(2027, 3, 13, 12, 0, 0, 0, ny), ny)
 	gt.True(t, got.Equal(time.Date(2027, 3, 14, 6, 30, 0, 0, time.UTC)))
-	got, err = s.Next(got)
-	gt.NoError(t, err).Required()
-	gt.True(t, got.Equal(time.Date(2027, 3, 15, 2, 30, 0, 0, ny)))
+	gt.True(t, at.Next(got, ny).Equal(time.Date(2027, 3, 15, 2, 30, 0, 0, ny)))
 
-	// 01:30 happens twice on 2026-11-01; whichever is chosen is after "after".
-	fall := model.DailySchedule{Hour: 1, Minute: 30, TimeZone: "America/New_York"}
+	// 01:30 happens twice on 2026-11-01; either is after "after".
 	after := time.Date(2026, 10, 31, 12, 0, 0, 0, ny)
-	got, err = fall.Next(after)
-	gt.NoError(t, err).Required()
+	got = model.DailyTime{Hour: 1, Minute: 30}.Next(after, ny)
 	gt.True(t, got.After(after))
 	gt.Equal(t, got.In(ny).Day(), 1)
 }
 
-func TestDailySchedule_Validate(t *testing.T) {
-	gt.NoError(t, model.DailySchedule{Hour: 0, Minute: 0, TimeZone: "UTC"}.Validate())
-	gt.NoError(t, model.DailySchedule{Hour: 23, Minute: 59, TimeZone: "Asia/Tokyo"}.Validate())
-
-	for name, s := range map[string]model.DailySchedule{
-		"negative hour":   {Hour: -1, TimeZone: "UTC"},
-		"hour 24":         {Hour: 24, TimeZone: "UTC"},
-		"negative minute": {Minute: -1, TimeZone: "UTC"},
-		"minute 60":       {Minute: 60, TimeZone: "UTC"},
-		"empty zone":      {Hour: 9},
-		"process zone":    {Hour: 9, TimeZone: "Local"},
-		"unknown zone":    {Hour: 9, TimeZone: "Mars/Base"},
-	} {
-		t.Run(name, func(t *testing.T) {
-			gt.Error(t, s.Validate())
-			_, err := s.Next(time.Now())
-			gt.Error(t, err)
-		})
+func TestDailyTime_Validate(t *testing.T) {
+	gt.NoError(t, model.DailyTime{Hour: 0, Minute: 0}.Validate())
+	gt.NoError(t, model.DailyTime{Hour: 23, Minute: 59}.Validate())
+	for _, at := range []model.DailyTime{{Hour: -1}, {Hour: 24}, {Minute: -1}, {Minute: 60}} {
+		gt.Error(t, at.Validate())
 	}
 }
 
-func TestJobKind(t *testing.T) {
-	gt.NoError(t, model.JobKindHello.Validate())
-	gt.True(t, model.JobKindHello.Known())
-	gt.NoError(t, model.JobKind("future_kind").Validate())
-	gt.False(t, model.JobKind("future_kind").Known())
-	gt.Error(t, model.JobKind("").Validate())
-	gt.Error(t, model.JobKind("Hello").Validate())
+func TestLoadTimeZone(t *testing.T) {
+	for _, name := range []string{"UTC", "Asia/Tokyo"} {
+		_, err := model.LoadTimeZone(name)
+		gt.NoError(t, err)
+	}
+	for _, name := range []string{"", "Local", "Mars/Base"} {
+		_, err := model.LoadTimeZone(name)
+		gt.Error(t, err)
+	}
+}
+
+func TestJobName(t *testing.T) {
+	gt.NoError(t, model.JobNameHello.Validate())
+	gt.True(t, model.JobNameHello.Known())
+	gt.NoError(t, model.JobName("future_job").Validate())
+	gt.False(t, model.JobName("future_job").Known())
+	gt.Error(t, model.JobName("").Validate())
+	gt.Error(t, model.JobName("Hello").Validate())
 }
 
 func TestValidateJobChannelID(t *testing.T) {
 	gt.NoError(t, model.ValidateJobChannelID("C0123ABCD"))
 	gt.NoError(t, model.ValidateJobChannelID("G0123ABCD"))
-	for _, id := range []string{"", "general", "D0123ABCD", "C0", "c0123abcd", "C0123/ABC"} {
+	for _, id := range []string{"", "general", "D0123ABCD", "C0", "c0123abcd"} {
 		gt.Error(t, model.ValidateJobChannelID(id))
 	}
 }
 
-func TestNewJobRunID(t *testing.T) {
-	at := time.Date(2026, 10, 5, 0, 0, 0, 0, time.UTC)
-	gt.Equal(t, model.NewJobRunID(at), model.JobRunID("20261005T000000Z"))
-	gt.Equal(t, model.NewJobRunID(at.In(mustLoad(t, "Asia/Tokyo"))), model.JobRunID("20261005T000000Z"))
-}
+const (
+	triggerA = model.JobTriggerID("6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f")
+	triggerB = model.JobTriggerID("7a2d3e4f-5b6c-4d7e-9f80-1b2c3d4e5f60")
+)
 
-const testJobID = model.JobID("6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f")
-
-func validJob() *model.Job {
+func validSetting() *model.JobSetting {
 	now := time.Now()
-	return &model.Job{
-		TeamID:      "T0123",
-		UserID:      "U0123",
-		ID:          testJobID,
-		Kind:        model.JobKindHello,
-		ChannelID:   "C0123ABCD",
-		ChannelName: "general",
-		Schedule:    model.DailySchedule{Hour: 9, TimeZone: "Asia/Tokyo"},
-		NextRunAt:   now.Add(time.Hour),
-		CreatedAt:   now,
-		UpdatedAt:   now,
-	}
-}
-
-func TestJob_Validate(t *testing.T) {
-	gt.NoError(t, validJob().Validate())
-
-	cases := map[string]func(j *model.Job){
-		"invalid user":       func(j *model.Job) { j.UserID = "x" },
-		"invalid ID":         func(j *model.Job) { j.ID = "x" },
-		"empty kind":         func(j *model.Job) { j.Kind = "" },
-		"DM channel":         func(j *model.Job) { j.ChannelID = "D0123ABCD" },
-		"empty channel name": func(j *model.Job) { j.ChannelName = "" },
-		"invalid schedule":   func(j *model.Job) { j.Schedule.Hour = 24 },
-		"empty next run":     func(j *model.Job) { j.NextRunAt = time.Time{} },
-		"empty created_at":   func(j *model.Job) { j.CreatedAt = time.Time{} },
-		"invalid last run": func(j *model.Job) {
-			j.LastRun = &model.JobRunSummary{RunID: "x", ScheduledAt: time.Now(), Status: "done"}
+	return &model.JobSetting{
+		TeamID:    "T0123",
+		UserID:    "U0123",
+		ChannelID: "C0123ABCD",
+		TimeZone:  "Asia/Tokyo",
+		Triggers: []model.JobTrigger{
+			{ID: triggerA, Job: model.JobNameHello, Time: model.DailyTime{Hour: 9}, NextRunAt: now.Add(time.Hour)},
+			{ID: triggerB, Job: model.JobNameHello, Time: model.DailyTime{Hour: 18}, NextRunAt: now.Add(2 * time.Hour)},
 		},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+}
+
+func TestJobSetting_Validate(t *testing.T) {
+	gt.NoError(t, validSetting().Validate())
+	noTriggers := validSetting()
+	noTriggers.Triggers = nil
+	gt.NoError(t, noTriggers.Validate())
+
+	cases := map[string]func(s *model.JobSetting){
+		"invalid user":         func(s *model.JobSetting) { s.UserID = "x" },
+		"DM channel":           func(s *model.JobSetting) { s.ChannelID = "D0123ABCD" },
+		"process time zone":    func(s *model.JobSetting) { s.TimeZone = "Local" },
+		"unknown time zone":    func(s *model.JobSetting) { s.TimeZone = "Mars/Base" },
+		"duplicate trigger ID": func(s *model.JobSetting) { s.Triggers[1].ID = triggerA },
+		"invalid trigger ID":   func(s *model.JobSetting) { s.Triggers[0].ID = "x" },
+		"invalid job name":     func(s *model.JobSetting) { s.Triggers[0].Job = "" },
+		"time out of range":    func(s *model.JobSetting) { s.Triggers[0].Time.Hour = 24 },
+		"no next run":          func(s *model.JobSetting) { s.Triggers[0].NextRunAt = time.Time{} },
+		"no created_at":        func(s *model.JobSetting) { s.CreatedAt = time.Time{} },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
-			j := validJob()
-			mutate(j)
-			gt.Error(t, j.Validate())
+			s := validSetting()
+			mutate(s)
+			gt.Error(t, s.Validate())
 		})
 	}
 }
 
-func validRun(status model.JobRunStatus) *model.JobRun {
-	scheduled := time.Date(2026, 10, 5, 0, 0, 0, 0, time.UTC)
-	started := scheduled.Add(time.Minute)
-	r := &model.JobRun{
-		TeamID:      "T0123",
-		UserID:      "U0123",
-		JobID:       testJobID,
-		ID:          model.NewJobRunID(scheduled),
-		Kind:        model.JobKindHello,
-		ScheduledAt: scheduled,
-		StartedAt:   started,
-		Status:      status,
-		ExpiresAt:   started.Add(720 * time.Hour),
-	}
-	switch status {
-	case model.JobRunRunning:
-		r.Deadline = started.Add(2 * time.Minute)
-	case model.JobRunFailed:
-		r.Failure = model.JobRunRunFailed
-		r.FinishedAt = started.Add(time.Second)
-	default:
-		r.FinishedAt = started.Add(time.Second)
-	}
-	return r
-}
+func TestJobSetting_TriggerAndClone(t *testing.T) {
+	s := validSetting()
+	gt.Value(t, s.Trigger(triggerB).Time.Hour).Equal(18)
+	gt.Value(t, s.Trigger("00000000-0000-4000-8000-000000000000")).Nil()
 
-func TestJobRun_Validate(t *testing.T) {
-	for _, s := range []model.JobRunStatus{model.JobRunRunning, model.JobRunSucceeded, model.JobRunFailed, model.JobRunSkipped} {
-		gt.NoError(t, validRun(s).Validate())
-	}
+	c := s.Clone()
+	c.Triggers[0].Time.Hour = 7
+	gt.Value(t, s.Triggers[0].Time.Hour).Equal(9)
 
-	cases := map[string]struct {
-		status model.JobRunStatus
-		mutate func(r *model.JobRun)
-	}{
-		"invalid job ID":            {model.JobRunSucceeded, func(r *model.JobRun) { r.JobID = "x" }},
-		"ID of another time":        {model.JobRunSucceeded, func(r *model.JobRun) { r.ID = "20261006T000000Z" }},
-		"unknown status":            {model.JobRunSucceeded, func(r *model.JobRun) { r.Status = "done" }},
-		"running with finished_at":  {model.JobRunRunning, func(r *model.JobRun) { r.FinishedAt = r.StartedAt }},
-		"running without deadline":  {model.JobRunRunning, func(r *model.JobRun) { r.Deadline = time.Time{} }},
-		"finished without time":     {model.JobRunSucceeded, func(r *model.JobRun) { r.FinishedAt = time.Time{} }},
-		"failed without failure":    {model.JobRunFailed, func(r *model.JobRun) { r.Failure = "" }},
-		"failure on a success":      {model.JobRunSucceeded, func(r *model.JobRun) { r.Failure = model.JobRunTimedOut }},
-		"unknown failure":           {model.JobRunFailed, func(r *model.JobRun) { r.Failure = "crashed" }},
-		"negative spending":         {model.JobRunSucceeded, func(r *model.JobRun) { r.Spent = -1 }},
-		"expires before it started": {model.JobRunSucceeded, func(r *model.JobRun) { r.ExpiresAt = r.StartedAt }},
-	}
-	for name, c := range cases {
-		t.Run(name, func(t *testing.T) {
-			r := validRun(c.status)
-			c.mutate(r)
-			gt.Error(t, r.Validate())
-		})
-	}
-}
-
-func TestJobRun_Summary(t *testing.T) {
-	r := validRun(model.JobRunFailed)
-	s := r.Summary()
-	gt.Equal(t, s.RunID, r.ID)
-	gt.Equal(t, s.Status, model.JobRunFailed)
-	gt.Equal(t, s.Failure, model.JobRunRunFailed)
-	gt.True(t, s.ScheduledAt.Equal(r.ScheduledAt))
-	gt.True(t, s.FinishedAt.Equal(r.FinishedAt))
-
-	j := validJob()
-	j.LastRun = s
-	gt.NoError(t, j.Validate())
-}
-
-func TestJobClaimRequest_Validate(t *testing.T) {
-	run := validRun(model.JobRunRunning)
-	valid := func() *model.JobClaimRequest {
-		return &model.JobClaimRequest{
-			JobID:       testJobID,
-			ScheduledAt: run.ScheduledAt,
-			NextRunAt:   run.ScheduledAt.Add(24 * time.Hour),
-			Run:         run,
-			Now:         run.StartedAt,
-		}
-	}
-	gt.NoError(t, valid().Validate())
-
-	cases := map[string]func(r *model.JobClaimRequest){
-		"next run not after":  func(r *model.JobClaimRequest) { r.NextRunAt = r.ScheduledAt },
-		"no run":              func(r *model.JobClaimRequest) { r.Run = nil },
-		"run of another time": func(r *model.JobClaimRequest) { r.ScheduledAt = r.ScheduledAt.Add(-time.Hour) },
-		"empty now":           func(r *model.JobClaimRequest) { r.Now = time.Time{} },
-	}
-	for name, mutate := range cases {
-		t.Run(name, func(t *testing.T) {
-			r := valid()
-			mutate(r)
-			gt.Error(t, r.Validate())
-		})
-	}
-}
-
-func TestJobScheduleEntry_Validate(t *testing.T) {
-	j := validJob()
-	gt.NoError(t, j.ScheduleEntry().Validate())
-	e := j.ScheduleEntry()
-	e.NextRunAt = time.Time{}
-	gt.Error(t, e.Validate())
-	e = j.ScheduleEntry()
-	e.JobID = "x"
-	gt.Error(t, e.Validate())
+	entries := s.ScheduleEntries()
+	gt.A(t, entries).Length(2).Required()
+	gt.Value(t, entries[0].Key()).Equal(s.Key())
+	gt.Value(t, entries[0].TriggerID).Equal(triggerA)
+	gt.True(t, entries[0].NextRunAt.Equal(s.Triggers[0].NextRunAt))
+	gt.NoError(t, entries[0].Validate())
 }

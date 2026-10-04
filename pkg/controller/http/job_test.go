@@ -18,78 +18,80 @@ import (
 	"github.com/m-mizutani/robin/pkg/usecase"
 )
 
-type jobCreateCall struct {
-	Key   model.UserKey
-	Input usecase.JobInput
+type saveCall struct {
+	Key       model.UserKey
+	ChannelID string
+	TimeZone  string
 }
 
-type jobDeleteCall struct {
+type addCall struct {
 	Key model.UserKey
-	ID  model.JobID
+	Job model.JobName
+	At  model.DailyTime
+}
+
+type deleteCall struct {
+	Key model.UserKey
+	ID  model.JobTriggerID
 }
 
 type fakeJobUseCase struct {
 	mu        sync.Mutex
-	list      *usecase.JobList
-	listErr   error
-	listKeys  []model.UserKey
-	created   *model.Job
-	createErr error
-	creates   []jobCreateCall
+	setting   *model.JobSetting
+	getErr    error
+	getKeys   []model.UserKey
+	saveErr   error
+	saves     []saveCall
+	trigger   *model.JobTrigger
+	addErr    error
+	adds      []addCall
 	deleteErr error
-	deletes   []jobDeleteCall
+	deletes   []deleteCall
 }
 
-func (f *fakeJobUseCase) List(_ context.Context, key model.UserKey) (*usecase.JobList, error) {
+func (f *fakeJobUseCase) Get(_ context.Context, key model.UserKey) (*model.JobSetting, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.listKeys = append(f.listKeys, key)
-	return f.list, f.listErr
+	f.getKeys = append(f.getKeys, key)
+	return f.setting, f.getErr
 }
 
-func (f *fakeJobUseCase) Create(_ context.Context, key model.UserKey, in usecase.JobInput) (*model.Job, error) {
+func (f *fakeJobUseCase) Save(_ context.Context, key model.UserKey, channelID, timeZone string) (*model.JobSetting, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.creates = append(f.creates, jobCreateCall{Key: key, Input: in})
-	if f.createErr != nil {
-		return nil, f.createErr
+	f.saves = append(f.saves, saveCall{key, channelID, timeZone})
+	if f.saveErr != nil {
+		return nil, f.saveErr
 	}
-	return f.created, nil
+	return &model.JobSetting{TeamID: key.TeamID, UserID: key.UserID, ChannelID: channelID, TimeZone: timeZone}, nil
 }
 
-func (f *fakeJobUseCase) Delete(_ context.Context, key model.UserKey, id model.JobID) error {
+func (f *fakeJobUseCase) AddTrigger(_ context.Context, key model.UserKey, job model.JobName, at model.DailyTime) (*model.JobTrigger, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.deletes = append(f.deletes, jobDeleteCall{Key: key, ID: id})
+	f.adds = append(f.adds, addCall{key, job, at})
+	if f.addErr != nil {
+		return nil, f.addErr
+	}
+	return f.trigger, nil
+}
+
+func (f *fakeJobUseCase) DeleteTrigger(_ context.Context, key model.UserKey, id model.JobTriggerID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.deletes = append(f.deletes, deleteCall{key, id})
 	return f.deleteErr
 }
 
 const (
-	jobsBase  = "/api/v1/jobs"
-	testJobID = model.JobID("00000000-0000-4000-8000-000000000001")
+	jobsBase      = "/api/v1/jobs"
+	testTriggerID = model.JobTriggerID("00000000-0000-4000-8000-000000000001")
 )
 
-func testJob() *model.Job {
-	created := time.Date(2026, 10, 4, 23, 30, 0, 0, time.UTC)
-	return &model.Job{
-		TeamID:      sessionKey.TeamID,
-		UserID:      sessionKey.UserID,
-		ID:          testJobID,
-		Kind:        model.JobKindHello,
-		ChannelID:   "C0GENERAL",
-		ChannelName: "general",
-		Schedule:    model.DailySchedule{Hour: 9, Minute: 5, TimeZone: "Asia/Tokyo"},
-		NextRunAt:   time.Date(2026, 10, 5, 0, 5, 0, 0, time.UTC),
-		CreatedAt:   created,
-		UpdatedAt:   created,
-	}
-}
-
-func testJobJSON(lastRun any) map[string]any {
-	return map[string]any{
-		"id": string(testJobID), "kind": "hello", "channel_id": "C0GENERAL", "channel_name": "general",
-		"hour": float64(9), "minute": float64(5), "time_zone": "Asia/Tokyo",
-		"next_run_at": "2026-10-05T00:05:00Z", "last_run": lastRun,
+func testTrigger() model.JobTrigger {
+	return model.JobTrigger{
+		ID: testTriggerID, Job: model.JobNameHello, Time: model.DailyTime{Hour: 9, Minute: 5},
+		NextRunAt: time.Date(2026, 10, 5, 0, 5, 0, 0, time.UTC),
 	}
 }
 
@@ -104,202 +106,202 @@ func newJobTestServer(t *testing.T, authUC *fakeAuthUseCase, jobUC *fakeJobUseCa
 	return srv
 }
 
-func TestJobsList(t *testing.T) {
-	t.Run("feature not configured", func(t *testing.T) {
+func jsonRequest(method, path, body string) *http.Request {
+	r := httptest.NewRequest(method, path, strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	return r
+}
+
+func TestJobsGet(t *testing.T) {
+	t.Run("without a setting", func(t *testing.T) {
 		authUC := newFakeAuthUseCase()
-		srv := newJobTestServer(t, authUC, nil)
+		jobUC := &fakeJobUseCase{}
+		srv := newJobTestServer(t, authUC, jobUC)
 		resp := serve(srv, withSession(httptest.NewRequest(http.MethodGet, jobsBase, nil), authUC))
 		gt.Number(t, resp.StatusCode).Equal(http.StatusOK)
-		gt.Value(t, decodeJSON(t, resp.Body)).Equal(map[string]any{"available": false, "max_jobs": float64(0), "jobs": []any{}})
+		gt.Value(t, decodeJSON(t, resp.Body)).Equal(map[string]any{"setting": nil, "triggers": []any{}})
+		gt.Value(t, jobUC.getKeys).Equal([]model.UserKey{sessionKey})
 	})
 
-	t.Run("jobs of the user", func(t *testing.T) {
+	t.Run("with a setting and triggers", func(t *testing.T) {
 		authUC := newFakeAuthUseCase()
-		withRun := testJob()
-		withRun.LastRun = &model.JobRunSummary{
-			RunID:       "20261004T000500Z",
-			Status:      model.JobRunFailed,
-			Failure:     model.JobRunTimedOut,
-			ScheduledAt: time.Date(2026, 10, 4, 0, 5, 0, 0, time.UTC),
-			Deadline:    time.Date(2026, 10, 4, 0, 8, 0, 0, time.UTC),
-			FinishedAt:  time.Date(2026, 10, 4, 0, 8, 1, 0, time.UTC),
-		}
-		jobUC := &fakeJobUseCase{list: &usecase.JobList{Jobs: []*model.Job{testJob(), withRun}, MaxJobs: 10}}
+		jobUC := &fakeJobUseCase{setting: &model.JobSetting{
+			ChannelID: "C0GENERAL", TimeZone: "Asia/Tokyo", Triggers: []model.JobTrigger{testTrigger()},
+		}}
 		srv := newJobTestServer(t, authUC, jobUC)
-
 		resp := serve(srv, withSession(httptest.NewRequest(http.MethodGet, jobsBase, nil), authUC))
 		gt.Number(t, resp.StatusCode).Equal(http.StatusOK)
 		gt.Value(t, decodeJSON(t, resp.Body)).Equal(map[string]any{
-			"available": true, "max_jobs": float64(10),
-			"jobs": []any{
-				testJobJSON(nil),
-				testJobJSON(map[string]any{
-					"status": "failed", "failure": "timed_out", "scheduled_at": "2026-10-04T00:05:00Z",
-					"deadline": "2026-10-04T00:08:00Z", "finished_at": "2026-10-04T00:08:01Z",
-				}),
-			},
+			"setting":  map[string]any{"channel_id": "C0GENERAL", "time_zone": "Asia/Tokyo"},
+			"triggers": []any{map[string]any{"id": string(testTriggerID), "job": "hello", "hour": float64(9), "minute": float64(5)}},
 		})
-		gt.Value(t, jobUC.listKeys).Equal([]model.UserKey{sessionKey})
-	})
-
-	t.Run("skipped run has no deadline", func(t *testing.T) {
-		authUC := newFakeAuthUseCase()
-		job := testJob()
-		job.LastRun = &model.JobRunSummary{
-			RunID: "20261004T000500Z", Status: model.JobRunSkipped,
-			ScheduledAt: time.Date(2026, 10, 4, 0, 5, 0, 0, time.UTC),
-			FinishedAt:  time.Date(2026, 10, 4, 2, 0, 0, 0, time.UTC),
-		}
-		srv := newJobTestServer(t, authUC, &fakeJobUseCase{list: &usecase.JobList{Jobs: []*model.Job{job}, MaxJobs: 10}})
-		resp := serve(srv, withSession(httptest.NewRequest(http.MethodGet, jobsBase, nil), authUC))
-		body := decodeJSON(t, resp.Body)
-		run := body["jobs"].([]any)[0].(map[string]any)["last_run"].(map[string]any)
-		gt.Value(t, run["deadline"]).Nil()
-		gt.Value(t, run["finished_at"]).Equal("2026-10-04T02:00:00Z")
-	})
-
-	t.Run("without a session", func(t *testing.T) {
-		srv := newJobTestServer(t, newFakeAuthUseCase(), &fakeJobUseCase{})
-		resp := serve(srv, httptest.NewRequest(http.MethodGet, jobsBase, nil))
-		gt.Number(t, resp.StatusCode).Equal(http.StatusUnauthorized)
 	})
 
 	t.Run("usecase failure", func(t *testing.T) {
 		authUC := newFakeAuthUseCase()
-		srv := newJobTestServer(t, authUC, &fakeJobUseCase{listErr: errors.New("firestore down")})
+		srv := newJobTestServer(t, authUC, &fakeJobUseCase{getErr: errors.New("firestore down")})
 		resp := serve(srv, withSession(httptest.NewRequest(http.MethodGet, jobsBase, nil), authUC))
 		gt.Number(t, resp.StatusCode).Equal(http.StatusInternalServerError)
 		gt.Value(t, decodeJSON(t, resp.Body)).Equal(map[string]any{"error": "internal_error"})
 	})
 }
 
-func postJob(srv *httpctrl.Server, authUC *fakeAuthUseCase, body string) *http.Response {
-	r := httptest.NewRequest(http.MethodPost, jobsBase, strings.NewReader(body))
-	r.Header.Set("Content-Type", "application/json")
-	return serve(srv, withSession(r, authUC))
-}
+func TestJobSettingPut(t *testing.T) {
+	const body = `{"channel_id":"C0GENERAL","time_zone":"Asia/Tokyo"}`
 
-const validJobBody = `{"kind":"hello","channel_id":"C0GENERAL","hour":9,"minute":5,"time_zone":"Asia/Tokyo"}`
-
-func TestJobsCreate(t *testing.T) {
-	t.Run("created", func(t *testing.T) {
+	t.Run("saved", func(t *testing.T) {
 		authUC := newFakeAuthUseCase()
-		jobUC := &fakeJobUseCase{created: testJob()}
+		jobUC := &fakeJobUseCase{}
 		srv := newJobTestServer(t, authUC, jobUC)
-
-		resp := postJob(srv, authUC, validJobBody)
-		gt.Number(t, resp.StatusCode).Equal(http.StatusCreated)
-		gt.Value(t, decodeJSON(t, resp.Body)).Equal(testJobJSON(nil))
-		gt.Value(t, jobUC.creates).Equal([]jobCreateCall{{Key: sessionKey, Input: usecase.JobInput{
-			Kind: model.JobKindHello, ChannelID: "C0GENERAL", Hour: 9, Minute: 5, TimeZone: "Asia/Tokyo",
-		}}})
+		resp := serve(srv, withSession(jsonRequest(http.MethodPut, jobsBase+"/setting", body), authUC))
+		gt.Number(t, resp.StatusCode).Equal(http.StatusOK)
+		gt.Value(t, decodeJSON(t, resp.Body)).Equal(map[string]any{"channel_id": "C0GENERAL", "time_zone": "Asia/Tokyo"})
+		gt.Value(t, jobUC.saves).Equal([]saveCall{{sessionKey, "C0GENERAL", "Asia/Tokyo"}})
 	})
 
-	t.Run("malformed request", func(t *testing.T) {
-		for name, body := range map[string]string{
-			"not JSON":    `kind=hello`,
-			"unknown key": `{"kind":"hello","channel_id":"C0GENERAL","hour":9,"minute":5,"time_zone":"Asia/Tokyo","owner":"U0BOB"}`,
-			"too large":   `{"kind":"` + strings.Repeat("a", 5000) + `"}`,
-			"wrong type":  `{"kind":"hello","channel_id":"C0GENERAL","hour":"9","minute":5,"time_zone":"Asia/Tokyo"}`,
-		} {
-			t.Run(name, func(t *testing.T) {
-				authUC := newFakeAuthUseCase()
-				jobUC := &fakeJobUseCase{created: testJob()}
-				srv := newJobTestServer(t, authUC, jobUC)
-				resp := postJob(srv, authUC, body)
-				gt.Number(t, resp.StatusCode).Equal(http.StatusBadRequest)
-				gt.Value(t, decodeJSON(t, resp.Body)).Equal(map[string]any{"error": "invalid_input"})
-				gt.A(t, jobUC.creates).Length(0)
-			})
-		}
-	})
-
-	t.Run("rejected by the usecase", func(t *testing.T) {
-		cases := map[string]struct {
-			err    error
-			status int
-			code   string
-		}{
-			"invalid input":         {usecase.ErrJobInvalidInput, http.StatusBadRequest, "invalid_input"},
-			"channel not found":     {usecase.ErrJobChannelNotFound, http.StatusBadRequest, "channel_not_found"},
-			"channel archived":      {usecase.ErrJobChannelArchived, http.StatusBadRequest, "channel_archived"},
-			"robin not in channel":  {usecase.ErrJobRobinNotInChannel, http.StatusBadRequest, "robin_not_in_channel"},
-			"user not in channel":   {usecase.ErrJobUserNotInChannel, http.StatusBadRequest, "user_not_in_channel"},
-			"limit reached":         {usecase.ErrJobLimitReached, http.StatusConflict, "job_limit_reached"},
-			"slack or store failed": {errors.New("ratelimited"), http.StatusInternalServerError, "internal_error"},
-		}
-		for name, c := range cases {
-			t.Run(name, func(t *testing.T) {
-				authUC := newFakeAuthUseCase()
-				srv := newJobTestServer(t, authUC, &fakeJobUseCase{createErr: goerr.Wrap(c.err, "wrapped")})
-				resp := postJob(srv, authUC, validJobBody)
-				gt.Number(t, resp.StatusCode).Equal(c.status)
-				gt.Value(t, decodeJSON(t, resp.Body)).Equal(map[string]any{"error": c.code})
-			})
-		}
-	})
-
-	t.Run("without a session", func(t *testing.T) {
-		jobUC := &fakeJobUseCase{created: testJob()}
-		srv := newJobTestServer(t, newFakeAuthUseCase(), jobUC)
-		r := httptest.NewRequest(http.MethodPost, jobsBase, strings.NewReader(validJobBody))
-		resp := serve(srv, r)
-		gt.Number(t, resp.StatusCode).Equal(http.StatusUnauthorized)
-		gt.A(t, jobUC.creates).Length(0)
-	})
-
-	t.Run("feature not configured", func(t *testing.T) {
-		authUC := newFakeAuthUseCase()
-		srv := newJobTestServer(t, authUC, nil)
-		resp := postJob(srv, authUC, validJobBody)
-		gt.Number(t, resp.StatusCode).Equal(http.StatusNotFound)
-	})
+	for name, c := range map[string]struct {
+		body   string
+		err    error
+		status int
+		code   string
+	}{
+		"not JSON":          {body: `channel=C0`, status: http.StatusBadRequest, code: "invalid_input"},
+		"unknown key":       {body: `{"channel_id":"C0GENERAL","time_zone":"UTC","user_id":"U0BOB"}`, status: http.StatusBadRequest, code: "invalid_input"},
+		"too large":         {body: `{"channel_id":"` + strings.Repeat("C", 5000) + `"}`, status: http.StatusBadRequest, code: "invalid_input"},
+		"rejected input":    {body: body, err: usecase.ErrJobInputInvalid, status: http.StatusBadRequest, code: "invalid_input"},
+		"store unavailable": {body: body, err: errors.New("firestore down"), status: http.StatusInternalServerError, code: "internal_error"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			authUC := newFakeAuthUseCase()
+			jobUC := &fakeJobUseCase{}
+			if c.err != nil {
+				jobUC.saveErr = goerr.Wrap(c.err, "wrapped")
+			}
+			srv := newJobTestServer(t, authUC, jobUC)
+			resp := serve(srv, withSession(jsonRequest(http.MethodPut, jobsBase+"/setting", c.body), authUC))
+			gt.Number(t, resp.StatusCode).Equal(c.status)
+			gt.Value(t, decodeJSON(t, resp.Body)).Equal(map[string]any{"error": c.code})
+		})
+	}
 }
 
-func TestJobsDelete(t *testing.T) {
+func TestJobTriggerPost(t *testing.T) {
+	const body = `{"job":"hello","hour":9,"minute":5}`
+
+	t.Run("added", func(t *testing.T) {
+		authUC := newFakeAuthUseCase()
+		tr := testTrigger()
+		jobUC := &fakeJobUseCase{trigger: &tr}
+		srv := newJobTestServer(t, authUC, jobUC)
+		resp := serve(srv, withSession(jsonRequest(http.MethodPost, jobsBase+"/triggers", body), authUC))
+		gt.Number(t, resp.StatusCode).Equal(http.StatusCreated)
+		gt.Value(t, decodeJSON(t, resp.Body)).Equal(map[string]any{"id": string(testTriggerID), "job": "hello", "hour": float64(9), "minute": float64(5)})
+		gt.Value(t, jobUC.adds).Equal([]addCall{{sessionKey, model.JobNameHello, model.DailyTime{Hour: 9, Minute: 5}}})
+	})
+
+	t.Run("midnight is a time, not a missing one", func(t *testing.T) {
+		authUC := newFakeAuthUseCase()
+		tr := testTrigger()
+		jobUC := &fakeJobUseCase{trigger: &tr}
+		srv := newJobTestServer(t, authUC, jobUC)
+		resp := serve(srv, withSession(jsonRequest(http.MethodPost, jobsBase+"/triggers", `{"job":"hello","hour":0,"minute":0}`), authUC))
+		gt.Number(t, resp.StatusCode).Equal(http.StatusCreated)
+		gt.Value(t, jobUC.adds).Equal([]addCall{{sessionKey, model.JobNameHello, model.DailyTime{}}})
+	})
+
+	for name, body := range map[string]string{
+		"no hour":     `{"job":"hello","minute":5}`,
+		"null minute": `{"job":"hello","hour":9,"minute":null}`,
+		"no time":     `{"job":"hello"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			authUC := newFakeAuthUseCase()
+			jobUC := &fakeJobUseCase{}
+			srv := newJobTestServer(t, authUC, jobUC)
+			resp := serve(srv, withSession(jsonRequest(http.MethodPost, jobsBase+"/triggers", body), authUC))
+			gt.Number(t, resp.StatusCode).Equal(http.StatusBadRequest)
+			gt.Value(t, decodeJSON(t, resp.Body)).Equal(map[string]any{"error": "invalid_input"})
+			gt.A(t, jobUC.adds).Length(0)
+		})
+	}
+
+	for name, c := range map[string]struct {
+		body   string
+		err    error
+		status int
+		code   string
+	}{
+		"wrong type":        {body: `{"job":"hello","hour":"9","minute":5}`, status: http.StatusBadRequest, code: "invalid_input"},
+		"rejected input":    {body: body, err: usecase.ErrJobInputInvalid, status: http.StatusBadRequest, code: "invalid_input"},
+		"no setting":        {body: body, err: usecase.ErrJobSettingRequired, status: http.StatusConflict, code: "setting_required"},
+		"store unavailable": {body: body, err: errors.New("firestore down"), status: http.StatusInternalServerError, code: "internal_error"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			authUC := newFakeAuthUseCase()
+			jobUC := &fakeJobUseCase{}
+			if c.err != nil {
+				jobUC.addErr = goerr.Wrap(c.err, "wrapped")
+			}
+			srv := newJobTestServer(t, authUC, jobUC)
+			resp := serve(srv, withSession(jsonRequest(http.MethodPost, jobsBase+"/triggers", c.body), authUC))
+			gt.Number(t, resp.StatusCode).Equal(c.status)
+			gt.Value(t, decodeJSON(t, resp.Body)).Equal(map[string]any{"error": c.code})
+		})
+	}
+}
+
+func TestJobTriggerDelete(t *testing.T) {
 	deleteReq := func(id string) *http.Request {
-		return httptest.NewRequest(http.MethodDelete, jobsBase+"/"+id, nil)
+		return httptest.NewRequest(http.MethodDelete, jobsBase+"/triggers/"+id, nil)
 	}
 
 	t.Run("deleted", func(t *testing.T) {
 		authUC := newFakeAuthUseCase()
 		jobUC := &fakeJobUseCase{}
 		srv := newJobTestServer(t, authUC, jobUC)
-		resp := serve(srv, withSession(deleteReq(string(testJobID)), authUC))
+		resp := serve(srv, withSession(deleteReq(string(testTriggerID)), authUC))
 		gt.Number(t, resp.StatusCode).Equal(http.StatusOK)
 		gt.Value(t, decodeJSON(t, resp.Body)).Equal(map[string]any{"success": true})
-		gt.Value(t, jobUC.deletes).Equal([]jobDeleteCall{{Key: sessionKey, ID: testJobID}})
+		gt.Value(t, jobUC.deletes).Equal([]deleteCall{{sessionKey, testTriggerID}})
 	})
 
 	t.Run("malformed ID", func(t *testing.T) {
 		authUC := newFakeAuthUseCase()
 		jobUC := &fakeJobUseCase{}
 		srv := newJobTestServer(t, authUC, jobUC)
-		resp := serve(srv, withSession(deleteReq("not-a-job"), authUC))
+		resp := serve(srv, withSession(deleteReq("not-a-trigger"), authUC))
 		gt.Number(t, resp.StatusCode).Equal(http.StatusNotFound)
-		gt.Value(t, decodeJSON(t, resp.Body)).Equal(map[string]any{"error": "not_found"})
 		gt.A(t, jobUC.deletes).Length(0)
 	})
 
 	t.Run("usecase failure", func(t *testing.T) {
 		authUC := newFakeAuthUseCase()
 		srv := newJobTestServer(t, authUC, &fakeJobUseCase{deleteErr: errors.New("firestore down")})
-		resp := serve(srv, withSession(deleteReq(string(testJobID)), authUC))
+		resp := serve(srv, withSession(deleteReq(string(testTriggerID)), authUC))
 		gt.Number(t, resp.StatusCode).Equal(http.StatusInternalServerError)
 	})
+}
 
-	t.Run("without a session", func(t *testing.T) {
-		jobUC := &fakeJobUseCase{}
-		srv := newJobTestServer(t, newFakeAuthUseCase(), jobUC)
-		resp := serve(srv, deleteReq(string(testJobID)))
+func TestJobs_RequireASession(t *testing.T) {
+	jobUC := &fakeJobUseCase{}
+	srv := newJobTestServer(t, newFakeAuthUseCase(), jobUC)
+	for _, r := range []*http.Request{
+		httptest.NewRequest(http.MethodGet, jobsBase, nil),
+		jsonRequest(http.MethodPut, jobsBase+"/setting", `{"channel_id":"C0GENERAL","time_zone":"UTC"}`),
+		jsonRequest(http.MethodPost, jobsBase+"/triggers", `{"job":"hello","hour":9,"minute":0}`),
+		httptest.NewRequest(http.MethodDelete, jobsBase+"/triggers/"+string(testTriggerID), nil),
+	} {
+		resp := serve(srv, r)
 		gt.Number(t, resp.StatusCode).Equal(http.StatusUnauthorized)
-		gt.A(t, jobUC.deletes).Length(0)
-	})
+	}
+	gt.A(t, jobUC.saves).Length(0)
+	gt.A(t, jobUC.adds).Length(0)
+	gt.A(t, jobUC.deletes).Length(0)
+}
 
-	t.Run("feature not configured", func(t *testing.T) {
-		authUC := newFakeAuthUseCase()
-		srv := newJobTestServer(t, authUC, nil)
-		resp := serve(srv, withSession(deleteReq(string(testJobID)), authUC))
-		gt.Number(t, resp.StatusCode).Equal(http.StatusNotFound)
-	})
+func TestJobs_NotMountedWithoutTheUseCase(t *testing.T) {
+	authUC := newFakeAuthUseCase()
+	srv := newJobTestServer(t, authUC, nil)
+	resp := serve(srv, withSession(httptest.NewRequest(http.MethodGet, jobsBase, nil), authUC))
+	gt.Number(t, resp.StatusCode).Equal(http.StatusNotFound)
 }

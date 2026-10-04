@@ -49,17 +49,9 @@ func TestSchedule_Validation(t *testing.T) {
 			args: without(validScheduleArgs(), "--anthropic-api-key"),
 			want: "--llm-vertex-project-id or --anthropic-api-key is required",
 		},
-		"zero max delay": {
-			args: append(validScheduleArgs(), "--max-delay", "0s"),
-			want: "--max-delay must be positive",
-		},
 		"zero concurrency": {
 			args: append(validScheduleArgs(), "--concurrency", "0"),
 			want: "--concurrency must be at least 1",
-		},
-		"another Slack API URL": {
-			args: append(validScheduleArgs(), "--slack-api-url", "http://127.0.0.1:18083/api/"),
-			want: "--slack-api-url can be changed only with --no-auth",
 		},
 		"a flag of serve only": {
 			args: append(validScheduleArgs(), "--slack-client-id", "client-id"),
@@ -119,7 +111,7 @@ func TestSchedule_FlagGroups(t *testing.T) {
 	}
 }
 
-// serve keeps every flag it had and gains only --slack-api-url.
+// serve keeps the flags it had before the flag groups were split.
 func TestServe_FlagNames(t *testing.T) {
 	got := cli.ServeFlagNamesForTest()
 	slices.Sort(got)
@@ -127,7 +119,7 @@ func TestServe_FlagNames(t *testing.T) {
 		"config", "addr", "base-url", "session-ttl",
 		"repository-backend", "firestore-project-id", "firestore-database-id",
 		"slack-client-id", "slack-client-secret", "slack-signing-secret", "slack-team-id",
-		"slack-bot-token", "slack-api-url",
+		"slack-bot-token",
 		"llm-vertex-project-id", "llm-vertex-region", "anthropic-api-key",
 		"kms-key-name",
 		"google-client-id", "google-client-secret",

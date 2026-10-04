@@ -54,9 +54,10 @@ type gitHubUseCase interface {
 }
 
 type jobUseCase interface {
-	List(ctx context.Context, key model.UserKey) (*usecase.JobList, error)
-	Create(ctx context.Context, key model.UserKey, in usecase.JobInput) (*model.Job, error)
-	Delete(ctx context.Context, key model.UserKey, id model.JobID) error
+	Get(ctx context.Context, key model.UserKey) (*model.JobSetting, error)
+	Save(ctx context.Context, key model.UserKey, channelID, timeZone string) (*model.JobSetting, error)
+	AddTrigger(ctx context.Context, key model.UserKey, job model.JobName, at model.DailyTime) (*model.JobTrigger, error)
+	DeleteTrigger(ctx context.Context, key model.UserKey, id model.JobTriggerID) error
 }
 
 type Config struct {
@@ -89,8 +90,8 @@ type options struct {
 	jobUC              jobUseCase
 }
 
-// WithJobs mounts POST /api/v1/jobs and DELETE /api/v1/jobs/{jobID}. Without
-// it, GET /api/v1/jobs reports the feature as unavailable.
+// WithJobs mounts the job setting endpoints under /api/v1/jobs. serve always
+// passes it; servers built for other tests may leave it out.
 func WithJobs(uc jobUseCase) Option {
 	return func(o *options) {
 		o.jobUC = uc
@@ -210,10 +211,11 @@ func New(authUC authUseCase, cfg Config, opts ...Option) (*Server, error) {
 		r.NotFound(apiNotFound)
 	})
 	r.Route(jobsPath, func(r chi.Router) {
-		r.With(requireSession(authUC)).Get("/", s.jobsListHandler)
 		if s.jobUC != nil {
-			r.With(requireSession(authUC)).Post("/", s.jobsCreateHandler)
-			r.With(requireSession(authUC)).Delete("/{jobID}", s.jobsDeleteHandler)
+			r.With(requireSession(authUC)).Get("/", s.jobsGetHandler)
+			r.With(requireSession(authUC)).Put("/setting", s.jobSettingPutHandler)
+			r.With(requireSession(authUC)).Post("/triggers", s.jobTriggerPostHandler)
+			r.With(requireSession(authUC)).Delete("/triggers/{triggerID}", s.jobTriggerDeleteHandler)
 		}
 		r.NotFound(apiNotFound)
 		r.MethodNotAllowed(apiNotFound)

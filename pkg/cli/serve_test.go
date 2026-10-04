@@ -23,7 +23,7 @@ func clearServeEnv(t *testing.T) {
 		"ROBIN_NOTION_CLIENT_ID", "ROBIN_NOTION_CLIENT_SECRET", "ROBIN_NOTION_WORKSPACE_ID", "ROBIN_NOTION_API_URL",
 		"ROBIN_GITHUB_CLIENT_ID", "ROBIN_GITHUB_CLIENT_SECRET",
 		"ROBIN_CONFIG", "ROBIN_LLM_VERTEX_PROJECT_ID", "ROBIN_LLM_VERTEX_REGION", "ROBIN_ANTHROPIC_API_KEY",
-		"ROBIN_SLACK_API_URL", "ROBIN_SCHEDULE_MAX_DELAY", "ROBIN_SCHEDULE_CONCURRENCY",
+		"ROBIN_SCHEDULE_CONCURRENCY",
 	} {
 		t.Setenv(name, "")
 		gt.NoError(t, os.Unsetenv(name)).Required()
@@ -236,24 +236,6 @@ func TestServe_NoAuthNeedsBotTokenAndSigningSecretTogether(t *testing.T) {
 		gt.Value(t, err).NotNil().Required()
 		gt.String(t, err.Error()).Contains("--slack-bot-token and --slack-signing-secret must be set together")
 	}
-}
-
-func TestServe_SlackAPIURLNeedsNoAuth(t *testing.T) {
-	clearServeEnv(t)
-	err := cli.Run(context.Background(), append(validServeArgs(), "--slack-api-url", "http://127.0.0.1:18083/api/"), "test")
-	gt.Value(t, err).NotNil().Required()
-	gt.String(t, err.Error()).Contains("--slack-api-url can be changed only with --no-auth")
-
-	// With --no-auth the bot calls the given URL.
-	args := append(noAuthGitHubArgs(),
-		"--slack-bot-token", "xoxb-token",
-		"--slack-signing-secret", "signing-secret",
-		"--anthropic-api-key", "sk-ant-test",
-		"--slack-api-url", "http://127.0.0.1:18083/api/",
-	)
-	err = cli.Run(context.Background(), args, "test")
-	gt.Value(t, err).NotNil().Required()
-	gt.String(t, err.Error()).Contains("HTTP server stopped")
 }
 
 func TestServe_SlackAgentNeedsLLM(t *testing.T) {

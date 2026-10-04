@@ -4,7 +4,7 @@ import (
 	"github.com/urfave/cli/v3"
 )
 
-var NewJobRunnersForTest = newJobRunners
+var NewJobsForTest = newJobs
 
 func flagNames(flags []cli.Flag) []string {
 	var out []string

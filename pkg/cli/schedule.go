@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"log/slog"
 	"os/signal"
 	"syscall"
 
@@ -11,7 +10,6 @@ import (
 
 	"github.com/m-mizutani/robin/pkg/cli/config"
 	"github.com/m-mizutani/robin/pkg/usecase"
-	"github.com/m-mizutani/robin/pkg/utils/logging"
 	"github.com/m-mizutani/robin/pkg/utils/safe"
 )
 
@@ -42,7 +40,7 @@ func (c *scheduleConfig) validate() error {
 	if err := c.repository.Validate(); err != nil {
 		return err
 	}
-	if err := c.slackBot.Validate(true, false); err != nil {
+	if err := c.slackBot.Validate(true); err != nil {
 		return err
 	}
 	if err := c.llm.Validate(true); err != nil {
@@ -80,21 +78,13 @@ func runSchedule(ctx context.Context, cfg *scheduleConfig) error {
 	}
 	defer safe.Close(ctx, repo)
 
-	runners, err := newJobRunners(ctx, settings, &cfg.llm, cfg.slackBot.Configure())
+	jobs, err := newJobs(ctx, settings, &cfg.llm, cfg.slackBot.Configure())
 	if err != nil {
 		return err
 	}
-	scheduler, err := usecase.NewScheduler(repo, runners, schedulerConfig(&cfg.scheduler))
+	scheduler, err := usecase.NewScheduler(repo, jobs, schedulerConfig(&cfg.scheduler))
 	if err != nil {
 		return goerr.Wrap(err, "failed to build the scheduler")
 	}
-
-	report, err := scheduler.RunDue(ctx)
-	logging.From(ctx).Info("scheduled jobs finished",
-		slog.Int("succeeded", report.Succeeded),
-		slog.Int("failed", report.Failed),
-		slog.Int("skipped", report.Skipped),
-		slog.Int("not_claimed", report.NotClaimed),
-		slog.Int("errors", report.Errors))
-	return err
+	return scheduler.RunDue(ctx)
 }

@@ -68,7 +68,7 @@ const githubConnected = githubStatus({ available: true, connected: true, login: 
 const githubPath = '/api/v1/integrations/github'
 
 const jobsPath = '/api/v1/jobs'
-const noJobs = '{"available":true,"max_jobs":10,"jobs":[]}'
+const noJobs = '{"setting":null,"triggers":[]}'
 
 // Shows the current URL, so tests can check that the result parameter is
 // removed after the notice is shown.
@@ -173,7 +173,7 @@ describe('Settings', () => {
     stubApi(me(true))
     renderSettings()
 
-    expect(await screen.findByText('No scheduled messages yet.')).toBeInTheDocument()
+    expect(await screen.findByLabelText('Channel ID')).toBeInTheDocument()
     expect(screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent)).toEqual([
       'Scheduled messages',
       'Integrations',

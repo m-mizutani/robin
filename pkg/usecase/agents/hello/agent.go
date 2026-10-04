@@ -1,5 +1,5 @@
-// Package hello is the job runner that posts a short morning greeting
-// written by the model to the job's channel.
+// Package hello is the job that posts a short morning greeting written by
+// the model to the user's job channel.
 package hello
 
 import (
@@ -28,11 +28,17 @@ var ErrNoGreeting = errors.New("model returned no greeting")
 
 type Config struct {
 	Rate model.Rate
+	// MaxDelay is how late a greeting may still be posted. A morning greeting
+	// posted at noon is of no use.
+	MaxDelay time.Duration
 }
 
 func (c Config) Validate() error {
 	if err := c.Rate.Validate(); err != nil {
 		return goerr.Wrap(err, "invalid hello agent rate")
+	}
+	if c.MaxDelay <= 0 {
+		return goerr.New("hello agent max delay must be positive", goerr.V("max_delay", c.MaxDelay))
 	}
 	return nil
 }
@@ -44,7 +50,7 @@ type Agent struct {
 	cfg Config
 }
 
-var _ usecase.JobRunner = &Agent{}
+var _ usecase.Job = &Agent{}
 
 func New(llm interfaces.LLMClient, bot interfaces.SlackBot, cfg Config) (*Agent, error) {
 	if err := cfg.Validate(); err != nil {
@@ -53,48 +59,47 @@ func New(llm interfaces.LLMClient, bot interfaces.SlackBot, cfg Config) (*Agent,
 	return &Agent{llm: llm, bot: bot, cfg: cfg}, nil
 }
 
-// renderRequest gives the model the day of the run in the job's time zone.
-func renderRequest(local time.Time, timeZone, channelName string) string {
-	return fmt.Sprintf("Date: %s (%s)\nTime zone: %s\nChannel: #%s\nWrite the greeting.",
-		local.Format("2006-01-02"), local.Weekday(), timeZone, channelName)
+func (a *Agent) MaxDelay() time.Duration { return a.cfg.MaxDelay }
+
+// renderRequest gives the model the day of the run in the user's time zone.
+func renderRequest(local time.Time, timeZone string) string {
+	return fmt.Sprintf("Date: %s (%s)\nTime zone: %s\nWrite the greeting.",
+		local.Format("2006-01-02"), local.Weekday(), timeZone)
 }
 
-func (a *Agent) Run(ctx context.Context, req usecase.JobRunRequest) (*usecase.JobRunResult, error) {
-	vals := []goerr.Option{goerr.V("job_id", req.Job.ID), goerr.V("run_id", req.RunID), goerr.V("channel_id", req.Job.ChannelID)}
+func (a *Agent) Run(ctx context.Context, req usecase.JobRequest) error {
+	vals := []goerr.Option{goerr.V("trigger_id", req.TriggerID), goerr.V("channel_id", req.ChannelID)}
 
-	loc, err := time.LoadLocation(req.Job.Schedule.TimeZone)
+	loc, err := model.LoadTimeZone(req.TimeZone)
 	if err != nil {
-		return nil, goerr.Wrap(err, "failed to load the job time zone", append(vals, goerr.V("time_zone", req.Job.Schedule.TimeZone))...)
+		return goerr.Wrap(err, "failed to load the user's time zone", vals...)
 	}
 
 	session, err := a.llm.NewSession(model.LLMSessionConfig{SystemPrompt: systemPrompt}, nil)
 	if err != nil {
-		return nil, goerr.Wrap(err, "failed to start the greeting conversation", vals...)
+		return goerr.Wrap(err, "failed to start the greeting conversation", vals...)
 	}
-	turn, err := session.Send(ctx, model.LLMInput{
-		UserText: renderRequest(req.ScheduledAt.In(loc), req.Job.Schedule.TimeZone, req.Job.ChannelName),
-	})
+	turn, err := session.Send(ctx, model.LLMInput{UserText: renderRequest(req.ScheduledAt.In(loc), req.TimeZone)})
 	if err != nil {
-		return nil, goerr.Wrap(err, "failed to write the greeting", vals...)
+		return goerr.Wrap(err, "failed to write the greeting", vals...)
 	}
-
-	result := &usecase.JobRunResult{Spent: a.cfg.Rate.Cost(turn.Usage)}
 	logging.From(ctx).Info("hello agent model call",
-		slog.String("job_id", string(req.Job.ID)),
+		slog.String("trigger_id", string(req.TriggerID)),
 		slog.String("stop_reason", string(turn.StopReason)),
 		slog.Int64("input_tokens", turn.Usage.InputTokens),
 		slog.Int64("output_tokens", turn.Usage.OutputTokens),
-		slog.Int64("spent_nano_usd", int64(result.Spent)))
+		slog.Int64("spent_nano_usd", int64(a.cfg.Rate.Cost(turn.Usage))))
 
 	text := strings.TrimSpace(turn.Text())
 	if turn.StopReason == model.LLMStopRefusal || turn.StopReason == model.LLMStopMaxTokens || text == "" {
-		return result, goerr.Wrap(ErrNoGreeting, "no greeting to post", append(vals, goerr.V("stop_reason", turn.StopReason))...)
+		return goerr.Wrap(ErrNoGreeting, "no greeting to post", append(vals, goerr.V("stop_reason", turn.StopReason))...)
 	}
 
-	ts, err := a.bot.PostMessage(ctx, req.Job.ChannelID, req.Key.UserID, text)
+	ts, err := a.bot.PostMessage(ctx, req.ChannelID, req.Key.UserID, text)
 	if err != nil {
-		return result, goerr.Wrap(err, "failed to post the greeting", vals...)
+		return goerr.Wrap(err, "failed to post the greeting", vals...)
 	}
-	result.MessageTS = ts
-	return result, nil
+	logging.From(ctx).Info("hello agent posted the greeting",
+		slog.String("trigger_id", string(req.TriggerID)), slog.String("channel_id", req.ChannelID), slog.String("ts", ts))
+	return nil
 }

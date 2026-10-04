@@ -29,7 +29,7 @@ func toArgs(m map[string]string) []string {
 func clearSlackEnv(t *testing.T) {
 	t.Helper()
 	unsetEnv(t, "ROBIN_SLACK_CLIENT_ID", "ROBIN_SLACK_CLIENT_SECRET", "ROBIN_SLACK_SIGNING_SECRET",
-		"ROBIN_SLACK_BOT_TOKEN", "ROBIN_SLACK_TEAM_ID", "ROBIN_SLACK_API_URL")
+		"ROBIN_SLACK_BOT_TOKEN", "ROBIN_SLACK_TEAM_ID")
 }
 
 func TestSlackApp_Validate(t *testing.T) {
@@ -72,7 +72,7 @@ func TestSlackBot(t *testing.T) {
 	t.Run("bot token", func(t *testing.T) {
 		var b config.SlackBot
 		parse(t, b.Flags(), "--slack-bot-token", "xoxb-token")
-		gt.NoError(t, b.Validate(true, false))
+		gt.NoError(t, b.Validate(true))
 		gt.Bool(t, b.Enabled()).True()
 		gt.Value(t, b.Configure()).NotNil()
 	})
@@ -80,29 +80,12 @@ func TestSlackBot(t *testing.T) {
 	t.Run("no bot token", func(t *testing.T) {
 		var b config.SlackBot
 		parse(t, b.Flags())
-		gt.NoError(t, b.Validate(false, false))
+		gt.NoError(t, b.Validate(false))
 		gt.Bool(t, b.Enabled()).False()
 		gt.Value(t, b.Configure()).Nil()
 
-		err := b.Validate(true, false)
+		err := b.Validate(true)
 		gt.Value(t, err).NotNil().Required()
 		gt.String(t, err.Error()).Contains("--slack-bot-token")
-	})
-
-	t.Run("API URL other than Slack needs no-auth", func(t *testing.T) {
-		var b config.SlackBot
-		parse(t, b.Flags(), "--slack-bot-token", "xoxb-token", "--slack-api-url", "http://127.0.0.1:18083/api/")
-		err := b.Validate(true, false)
-		gt.Value(t, err).NotNil().Required()
-		gt.String(t, err.Error()).Contains("--slack-api-url can be changed only with --no-auth")
-		gt.NoError(t, b.Validate(true, true))
-	})
-
-	t.Run("API URL that is not http", func(t *testing.T) {
-		for _, u := range []string{"ftp://slack.example.com/api/", "slack.com/api", "http://"} {
-			var b config.SlackBot
-			parse(t, b.Flags(), "--slack-api-url", u)
-			gt.Error(t, b.Validate(false, true))
-		}
 	})
 }

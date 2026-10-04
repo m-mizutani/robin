@@ -38,7 +38,7 @@ test.beforeEach(async ({ page }) => {
   // messages, unless a test mocks them.
   await mockNotion(page, 200, notionNotConnected)
   await mockGitHub(page, 200, githubNotConnected)
-  await mockJobs(page, 200, jobsStatus([]))
+  await mockJobs(page, 200, jobsStatus(null))
 })
 
 // Resolved against the working directory, which is frontend/ for `pnpm screenshots`.
@@ -112,39 +112,19 @@ async function mockGitHub(page: Page, status: number, body: object) {
   )
 }
 
-type LastRun = {
-  status: string
-  failure: string
-  scheduled_at: string
-  deadline: string | null
-  finished_at: string | null
+function trigger(n: number, hour: number, minute = 0) {
+  return { id: `00000000-0000-4000-8000-00000000000${n}`, job: 'hello', hour, minute }
 }
 
-function scheduledJob(n: number, channel: string, lastRun: LastRun | null) {
-  return {
-    id: `00000000-0000-4000-8000-00000000000${n}`,
-    kind: 'hello',
-    channel_id: `C0${channel.toUpperCase().replace(/[^A-Z0-9]/g, '')}`,
-    channel_name: channel,
-    hour: 9,
-    minute: 0,
-    time_zone: 'Asia/Tokyo',
-    next_run_at: '2026-10-05T00:00:00Z',
-    last_run: lastRun,
-  }
+const savedSetting = { channel_id: 'C0123ABCD', time_zone: 'Asia/Tokyo' }
+
+function jobsStatus(setting: object | null, triggers: object[] = []) {
+  return { setting, triggers }
 }
 
-function jobsStatus(jobs: object[], overrides: object = {}) {
-  return { available: true, max_jobs: 10, jobs, ...overrides }
-}
-
-// Answers GET /api/v1/jobs only; POST to the same path goes to the routes a
-// test registers.
 async function mockJobs(page: Page, status: number, body: object) {
   await page.route('**/api/v1/jobs', (route) =>
-    route.request().method() === 'GET'
-      ? route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
-      : route.fallback(),
+    route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) }),
   )
 }
 
@@ -527,21 +507,8 @@ test.describe('scheduled messages', () => {
     await mockGoogle(page, 200, googleNotConnected)
   })
 
-  const posted: LastRun = {
-    status: 'succeeded',
-    failure: '',
-    scheduled_at: '2026-10-04T00:00:00Z',
-    deadline: '2026-10-04T00:02:00Z',
-    finished_at: '2026-10-04T00:00:12Z',
-  }
-  const everyLastRun = [
-    scheduledJob(1, 'general', null),
-    scheduledJob(2, 'team-tokyo', { ...posted, status: 'running', finished_at: null, deadline: '2099-01-01T00:00:00Z' }),
-    scheduledJob(3, 'team-osaka', { ...posted, status: 'running', finished_at: null }),
-    scheduledJob(4, 'random', posted),
-    scheduledJob(5, 'releases', { ...posted, status: 'failed', failure: 'run_failed', finished_at: '2026-10-04T00:00:40Z' }),
-    scheduledJob(6, 'support', { ...posted, status: 'skipped', deadline: null, finished_at: '2026-10-04T01:30:00Z' }),
-  ]
+  const greeting = (page: Page) => page.getByRole('region', { name: 'Morning greeting' })
+  const withTimes = jobsStatus(savedSetting, [trigger(1, 9), trigger(2, 18, 30)])
 
   test('settings: scheduled messages loading', async ({ page }) => {
     await page.route('**/api/v1/jobs', () => new Promise(() => {}))
@@ -557,82 +524,95 @@ test.describe('scheduled messages', () => {
     await page.screenshot(shot('settings-jobs-load-failed'))
   })
 
-  test('settings: scheduled messages not available', async ({ page }) => {
-    await mockJobs(page, 200, jobsStatus([], { available: false, max_jobs: 0 }))
+  test('settings: scheduled messages without a setting', async ({ page }) => {
     await page.goto('/settings')
-    await expect(scheduled(page).getByText('Your Robin administrator has not set up scheduled messages.')).toBeVisible()
-    await page.screenshot(shot('settings-jobs-unavailable'))
+    await expect(greeting(page).getByText('Save the channel and time zone first.')).toBeVisible()
+    await page.screenshot(shot('settings-jobs-no-setting'))
   })
 
-  test('settings: no scheduled messages', async ({ page }) => {
+  test('settings: scheduled messages without times', async ({ page }) => {
+    await mockJobs(page, 200, jobsStatus(savedSetting))
     await page.goto('/settings')
-    await expect(scheduled(page).getByText('No scheduled messages yet.')).toBeVisible()
-    await page.screenshot(shot('settings-jobs-empty'))
+    await expect(greeting(page).getByText('No times yet.')).toBeVisible()
+    await page.screenshot(shot('settings-jobs-no-times'))
   })
 
-  test('settings: scheduled messages with every kind of last run', async ({ page }) => {
-    await mockJobs(page, 200, jobsStatus(everyLastRun))
+  test('settings: scheduled messages with times', async ({ page }) => {
+    await mockJobs(page, 200, withTimes)
     await page.goto('/settings')
-    await expect(page.getByRole('listitem', { name: 'Morning greeting in #support' })).toBeVisible()
-    await page.screenshot(shot('settings-jobs-list'))
+    await expect(greeting(page).getByRole('listitem', { name: '18:30' })).toBeVisible()
+    await page.screenshot(shot('settings-jobs-times'))
   })
 
-  test('settings: adding a scheduled message', async ({ page }) => {
-    await page.route('**/api/v1/jobs', (route) =>
-      route.request().method() === 'POST' ? new Promise(() => {}) : route.fallback(),
-    )
+  test('settings: saving the job setting', async ({ page }) => {
+    await page.route('**/api/v1/jobs/setting', () => new Promise(() => {}))
     await page.goto('/settings')
-    await page.getByLabel('Channel ID').fill('C0GENERAL')
-    await page.getByRole('button', { name: 'Add', exact: true }).click()
-    await expect(scheduled(page).getByRole('button', { name: 'Adding…' })).toBeDisabled()
-    await page.screenshot(shot('settings-jobs-adding'))
+    await page.getByLabel('Channel ID').fill('C0123ABCD')
+    await page.getByRole('button', { name: 'Save', exact: true }).click()
+    await expect(scheduled(page).getByRole('button', { name: 'Saving…' })).toBeDisabled()
+    await page.screenshot(shot('settings-jobs-saving'))
   })
 
-  for (const [code, status, name] of [
-    ['robin_not_in_channel', 400, 'settings-jobs-add-failed-robin-not-in-channel'],
-    ['user_not_in_channel', 400, 'settings-jobs-add-failed-user-not-in-channel'],
-    ['channel_not_found', 400, 'settings-jobs-add-failed-channel-not-found'],
-    ['channel_archived', 400, 'settings-jobs-add-failed-channel-archived'],
-    ['internal_error', 500, 'settings-jobs-add-failed'],
+  for (const [name, status, body, text] of [
+    ['settings-jobs-saved', 200, savedSetting, 'Saved.'],
+    ['settings-jobs-save-invalid', 400, { error: 'invalid_input' }, 'Check the channel ID and time zone.'],
+    ['settings-jobs-save-failed', 500, { error: 'internal_error' }, 'Could not save. Try again.'],
   ] as const) {
-    test(`settings: adding a scheduled message rejected with ${code}`, async ({ page }) => {
-      await page.route('**/api/v1/jobs', (route) =>
-        route.request().method() === 'POST'
-          ? route.fulfill({ status, contentType: 'application/json', body: JSON.stringify({ error: code }) })
-          : route.fallback(),
+    test(`settings: job setting save result ${name}`, async ({ page }) => {
+      await page.route('**/api/v1/jobs/setting', (route) =>
+        route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) }),
       )
       await page.goto('/settings')
-      await page.getByLabel('Channel ID').fill('C0GENERAL')
-      await page.getByRole('button', { name: 'Add', exact: true }).click()
-      await expect(scheduled(page).getByRole('alert')).toBeVisible()
+      await page.getByLabel('Channel ID').fill('C0123ABCD')
+      await page.getByRole('button', { name: 'Save', exact: true }).click()
+      await expect(scheduled(page).getByText(text)).toBeVisible()
       await page.screenshot(shot(name))
     })
   }
 
-  test('settings: scheduled messages at the limit', async ({ page }) => {
-    await mockJobs(page, 200, jobsStatus(everyLastRun.slice(0, 2), { max_jobs: 2 }))
+  test('settings: adding a time', async ({ page }) => {
+    await mockJobs(page, 200, jobsStatus(savedSetting))
+    await page.route('**/api/v1/jobs/triggers', () => new Promise(() => {}))
     await page.goto('/settings')
-    await expect(scheduled(page).getByText('You have 2 scheduled messages, the most allowed.', { exact: false })).toBeVisible()
-    await page.screenshot(shot('settings-jobs-limit'))
+    await greeting(page).getByRole('button', { name: 'Add', exact: true }).click()
+    await expect(greeting(page).getByRole('button', { name: 'Adding…' })).toBeDisabled()
+    await page.screenshot(shot('settings-jobs-adding'))
   })
 
-  test('settings: deleting a scheduled message', async ({ page }) => {
-    await mockJobs(page, 200, jobsStatus([scheduledJob(1, 'general', posted)]))
-    await page.route('**/api/v1/jobs/*', () => new Promise(() => {}))
+  for (const [name, status, code, text] of [
+    ['settings-jobs-add-invalid', 400, 'invalid_input', 'Check the time.'],
+    ['settings-jobs-add-no-setting', 409, 'setting_required', 'Save the channel and time zone first.'],
+    ['settings-jobs-add-failed', 500, 'internal_error', 'Could not add the time. Try again.'],
+  ] as const) {
+    test(`settings: adding a time rejected ${name}`, async ({ page }) => {
+      await mockJobs(page, 200, jobsStatus(savedSetting))
+      await page.route('**/api/v1/jobs/triggers', (route) =>
+        route.fulfill({ status, contentType: 'application/json', body: JSON.stringify({ error: code }) }),
+      )
+      await page.goto('/settings')
+      await greeting(page).getByRole('button', { name: 'Add', exact: true }).click()
+      await expect(greeting(page).getByRole('alert')).toHaveText(text)
+      await page.screenshot(shot(name))
+    })
+  }
+
+  test('settings: deleting a time', async ({ page }) => {
+    await mockJobs(page, 200, withTimes)
+    await page.route('**/api/v1/jobs/triggers/*', () => new Promise(() => {}))
     await page.goto('/settings')
-    await page.getByRole('button', { name: 'Delete Morning greeting in #general' }).click()
-    await expect(page.getByRole('button', { name: 'Delete Morning greeting in #general' })).toHaveText('Deleting…')
+    await page.getByRole('button', { name: 'Delete 09:00' }).click()
+    await expect(page.getByRole('button', { name: 'Delete 09:00' })).toHaveText('Deleting…')
     await page.screenshot(shot('settings-jobs-deleting'))
   })
 
-  test('settings: deleting a scheduled message failed', async ({ page }) => {
-    await mockJobs(page, 200, jobsStatus([scheduledJob(1, 'general', posted)]))
-    await page.route('**/api/v1/jobs/*', (route) =>
+  test('settings: deleting a time failed', async ({ page }) => {
+    await mockJobs(page, 200, withTimes)
+    await page.route('**/api/v1/jobs/triggers/*', (route) =>
       route.fulfill({ status: 500, contentType: 'application/json', body: '{"error":"internal_error"}' }),
     )
     await page.goto('/settings')
-    await page.getByRole('button', { name: 'Delete Morning greeting in #general' }).click()
-    await expect(scheduled(page).getByRole('alert')).toContainText('Could not delete this scheduled message.')
+    await page.getByRole('button', { name: 'Delete 09:00' }).click()
+    await expect(greeting(page).getByRole('alert')).toHaveText('Could not delete the time. Try again.')
     await page.screenshot(shot('settings-jobs-delete-failed'))
   })
 })

@@ -26,7 +26,7 @@ var (
 
 var StartPhrasesForTest = startPhrases
 
-func (uc *JobUseCase) SetClockForTest(now func() time.Time, newID func() string) {
+func (uc *JobSettingUseCase) SetClockForTest(now func() time.Time, newID func() string) {
 	uc.now = now
 	uc.newID = newID
 }

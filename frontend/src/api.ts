@@ -133,84 +133,65 @@ export function startGitHubConnect(): void {
   window.location.assign(`${githubPath}/connect`)
 }
 
-export type JobKind = 'hello'
+// The jobs Robin can start, by the name the server uses.
+export type JobName = 'hello'
 
-export type JobLastRun = {
-  status: 'running' | 'succeeded' | 'failed' | 'skipped'
-  // why the run failed; empty unless status is "failed"
-  failure: '' | 'no_runner' | 'run_failed' | 'timed_out'
-  scheduled_at: string
-  // when a running run gives up; null for a run that was not started
-  deadline: string | null
-  finished_at: string | null
+export type JobSetting = {
+  channel_id: string
+  time_zone: string
 }
 
-export type Job = {
+export type JobTrigger = {
   id: string
-  kind: JobKind
-  channel_id: string
-  channel_name: string
+  job: string
   hour: number
   minute: number
-  time_zone: string
-  next_run_at: string
-  last_run: JobLastRun | null
 }
 
 export type JobsStatus = {
-  // false when the server has no Slack bot token configured
-  available: boolean
-  max_jobs: number
-  jobs: Job[]
+  // null until the user saves the channel and the time zone
+  setting: JobSetting | null
+  triggers: JobTrigger[]
 }
 
-export type JobInput = {
-  kind: JobKind
-  channel_id: string
-  hour: number
-  minute: number
-  time_zone: string
-}
-
-// Reasons the server gives for not adding a job.
-export const jobErrorCodes = [
-  'invalid_input',
-  'channel_not_found',
-  'channel_archived',
-  'robin_not_in_channel',
-  'user_not_in_channel',
-  'job_limit_reached',
-] as const
+// Reasons the server gives for rejecting a change.
+export const jobErrorCodes = ['invalid_input', 'setting_required'] as const
 export type JobErrorCode = (typeof jobErrorCodes)[number]
 
-export type CreateJobResult = { kind: 'created'; job: Job } | { kind: 'rejected'; code: JobErrorCode }
+export type JobResult<T> = { kind: 'done'; value: T } | { kind: 'rejected'; code: JobErrorCode }
 
 const jobsPath = `${apiV1}/jobs`
 
-// Throws when the request fails or the response is not 2xx.
+// Throws when the request fails, the response is not 2xx, or the body is not
+// a job status, so a broken answer shows as a failed load instead of
+// breaking the page.
 export async function fetchJobs(): Promise<JobsStatus> {
   const res = await fetch(jobsPath, { credentials: 'include' })
   if (!res.ok) {
     throw new Error(`HTTP ${res.status}`)
   }
-  return (await res.json()) as JobsStatus
+  const body = (await res.json()) as Partial<JobsStatus>
+  if (!Array.isArray(body.triggers) || body.setting === undefined) {
+    throw new Error('unexpected job status')
+  }
+  return body as JobsStatus
 }
 
-// Returns the reason when the server rejects the job, and throws for any other
-// failure.
-export async function createJob(input: JobInput): Promise<CreateJobResult> {
-  const res = await fetch(jobsPath, {
-    method: 'POST',
+// sendJobChange returns the reason when the server rejects the change, and
+// throws for any other failure.
+async function sendJobChange<T>(path: string, method: 'PUT' | 'POST', body: object): Promise<JobResult<T>> {
+  const res = await fetch(path, {
+    method,
     credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(input),
+    body: JSON.stringify(body),
   })
   if (res.ok) {
-    return { kind: 'created', job: (await res.json()) as Job }
+    return { kind: 'done', value: (await res.json()) as T }
   }
   if (res.status === 400 || res.status === 409) {
-    const body = (await res.json().catch(() => ({}))) as { error?: string }
-    const code = jobErrorCodes.find((c) => c === body.error)
+    const data = (await res.json().catch(() => ({}))) as { error?: string }
+    const code = jobErrorCodes.find((c) => c === data.error)
     if (code) {
       return { kind: 'rejected', code }
     }
@@ -218,8 +199,16 @@ export async function createJob(input: JobInput): Promise<CreateJobResult> {
   throw new Error(`HTTP ${res.status}`)
 }
 
-export async function deleteJob(id: string): Promise<void> {
-  const res = await fetch(`${jobsPath}/${encodeURIComponent(id)}`, { method: 'DELETE', credentials: 'include' })
+export function saveJobSetting(setting: JobSetting): Promise<JobResult<JobSetting>> {
+  return sendJobChange(`${jobsPath}/setting`, 'PUT', setting)
+}
+
+export function addJobTrigger(input: { job: JobName; hour: number; minute: number }): Promise<JobResult<JobTrigger>> {
+  return sendJobChange(`${jobsPath}/triggers`, 'POST', input)
+}
+
+export async function deleteJobTrigger(id: string): Promise<void> {
+  const res = await fetch(`${jobsPath}/triggers/${encodeURIComponent(id)}`, { method: 'DELETE', credentials: 'include' })
   if (!res.ok) {
     throw new Error(`HTTP ${res.status}`)
   }

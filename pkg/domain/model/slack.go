@@ -87,14 +87,6 @@ type SlackPostedMessage struct {
 	Requester SlackUserID
 }
 
-// SlackChannel is a channel as conversations.info returns it.
-type SlackChannel struct {
-	ID         string
-	Name       string
-	IsPrivate  bool
-	IsArchived bool
-}
-
 // SlackMessageShortcut is a message shortcut a user chose on a message.
 type SlackMessageShortcut struct {
 	TeamID     SlackTeamID

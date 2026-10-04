@@ -3,6 +3,7 @@ package cli_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/m-mizutani/gt"
 	"github.com/urfave/cli/v3"
@@ -13,9 +14,9 @@ import (
 	"github.com/m-mizutani/robin/pkg/usecase/usecasetest"
 )
 
-// Every kind this build defines has a runner, so no job of a known kind is
-// recorded as having none.
-func TestNewJobRunners_CoversEveryKind(t *testing.T) {
+// Every job name this build defines has a job, so no trigger of a known job
+// is skipped as undefined.
+func TestNewJobs_CoversEveryJobName(t *testing.T) {
 	clearServeEnv(t)
 	var llm config.LLM
 	cmd := &cli.Command{Name: "test", Flags: llm.Flags()}
@@ -25,10 +26,11 @@ func TestNewJobRunners_CoversEveryKind(t *testing.T) {
 	settings, err := file.Load(context.Background())
 	gt.NoError(t, err).Required()
 
-	runners, err := robincli.NewJobRunnersForTest(context.Background(), settings, &llm, usecasetest.NewSlackBot())
+	jobs, err := robincli.NewJobsForTest(context.Background(), settings, &llm, usecasetest.NewSlackBot())
 	gt.NoError(t, err).Required()
-	gt.Number(t, len(runners)).Equal(len(model.JobKinds()))
-	for _, kind := range model.JobKinds() {
-		gt.Value(t, runners[kind]).NotNil()
+	gt.Number(t, len(jobs)).Equal(len(model.JobNames()))
+	for _, name := range model.JobNames() {
+		gt.Value(t, jobs[name]).NotNil()
 	}
+	gt.Value(t, jobs[model.JobNameHello].MaxDelay()).Equal(time.Hour)
 }

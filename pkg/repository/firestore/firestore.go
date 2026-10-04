@@ -35,11 +35,12 @@ const (
 	// agentThreadsCollection is keyed by the agent session ID and names the
 	// only user who owns the conversation of the thread.
 	agentThreadsCollection = "agentThreads"
-	jobsCollection         = "jobs"
-	// jobRunsCollection is a subcollection of one job.
-	jobRunsCollection = "jobRuns"
-	// schedulesCollection is keyed by the job ID and holds the owner and the
-	// next run time of every job, so the scheduler can find due jobs.
+	// settingsCollection holds a user's settings; jobSettingDocID is the job
+	// setting with its triggers.
+	settingsCollection = "settings"
+	jobSettingDocID    = "job"
+	// schedulesCollection is keyed by the job trigger ID and holds only the
+	// owner and the next run time, so the scheduler can find due triggers.
 	schedulesCollection = "schedules"
 )
 
@@ -53,7 +54,7 @@ type Firestore struct {
 	session                   *sessionRepository
 	slackEvent                *slackEventRepository
 	agentSession              *agentSessionRepository
-	job                       *jobRepository
+	jobSetting                *jobSettingRepository
 }
 
 var _ interfaces.Repository = &Firestore{}
@@ -84,11 +85,11 @@ func New(ctx context.Context, projectID, databaseID string) (*Firestore, error) 
 		session:                   &sessionRepository{client: client},
 		slackEvent:                &slackEventRepository{client: client},
 		agentSession:              &agentSessionRepository{client: client},
-		job:                       &jobRepository{client: client},
+		jobSetting:                &jobSettingRepository{client: client},
 	}, nil
 }
 
-func (f *Firestore) Job() interfaces.JobRepository { return f.job }
+func (f *Firestore) JobSetting() interfaces.JobSettingRepository { return f.jobSetting }
 
 func (f *Firestore) User() interfaces.UserRepository                       { return f.user }
 func (f *Firestore) SlackCredential() interfaces.SlackCredentialRepository { return f.slackCredential }

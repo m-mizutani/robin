@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"sync"
 	"time"
 
 	"github.com/m-mizutani/goerr/v2"
@@ -16,313 +15,177 @@ import (
 	"github.com/m-mizutani/robin/pkg/utils/logging"
 )
 
-// finishTimeout bounds the write of a run's result. It does not use the run's
-// own deadline, so a run that timed out is still recorded.
-const finishTimeout = 30 * time.Second
-
-// JobRunner runs one run of a job. The agents under pkg/usecase/agents and
-// any other runner implement it; pkg/cli maps each JobKind to one.
-type JobRunner interface {
-	// Run returns the result to record. A non-nil result may come with an
-	// error, so that the money already spent is recorded with the failure.
-	Run(ctx context.Context, req JobRunRequest) (*JobRunResult, error)
+// Job is a unit of work the scheduler starts. Agents and other tasks
+// implement it; pkg/cli maps each JobName to one.
+type Job interface {
+	// MaxDelay is how late a run may start; a later run is skipped. Zero
+	// runs a late run however late it is.
+	MaxDelay() time.Duration
+	Run(ctx context.Context, req JobRequest) error
 }
 
-type JobRunRequest struct {
+// JobRequest is one run of a job for one user.
+type JobRequest struct {
 	Key         model.UserKey
-	Job         model.Job
-	RunID       model.JobRunID
+	TriggerID   model.JobTriggerID
+	ChannelID   string
+	TimeZone    string
 	ScheduledAt time.Time
 }
 
-type JobRunResult struct {
-	MessageTS string // first message posted; empty when none
-	Spent     model.NanoUSD
-}
-
 type SchedulerConfig struct {
-	MaxDelay    time.Duration // a run later than this is skipped
-	RunTimeout  time.Duration // limit of one runner call
-	RunTTL      time.Duration // lifetime of a run record
-	Concurrency int           // runners running at once
-	BatchSize   int           // entries read per ListDue
+	RunTimeout  time.Duration // limit of one run
+	Concurrency int           // runs at the same time
 }
 
 func (c SchedulerConfig) Validate() error {
-	if c.MaxDelay <= 0 || c.RunTimeout <= 0 || c.RunTTL <= c.RunTimeout {
-		return goerr.New("invalid scheduler durations",
-			goerr.V("max_delay", c.MaxDelay), goerr.V("run_timeout", c.RunTimeout), goerr.V("run_ttl", c.RunTTL))
-	}
-	if c.Concurrency < 1 || c.BatchSize < 1 {
-		return goerr.New("invalid scheduler limits", goerr.V("concurrency", c.Concurrency), goerr.V("batch_size", c.BatchSize))
+	if c.RunTimeout <= 0 || c.Concurrency < 1 {
+		return goerr.New("invalid scheduler config",
+			goerr.V("run_timeout", c.RunTimeout), goerr.V("concurrency", c.Concurrency))
 	}
 	return nil
 }
 
-// SchedulerReport counts what one RunDue did with the due jobs it found.
-type SchedulerReport struct {
-	Succeeded int
-	Failed    int
-	Skipped   int
-	// NotClaimed counts due jobs another process claimed first.
-	NotClaimed int
-	// Errors counts due jobs that could not be read or claimed.
-	Errors int
-}
-
-// Scheduler runs due jobs. It keeps no state between calls of RunDue, so the
-// same Scheduler may serve a command and HTTP requests at once; the claim in
-// the repository keeps a run from starting twice.
+// Scheduler runs due triggers. It keeps no state between calls of RunDue, so
+// the same Scheduler may serve a command and HTTP requests at once; the claim
+// keeps a run from starting twice.
 type Scheduler struct {
-	repo    interfaces.Repository
-	runners map[model.JobKind]JobRunner
-	cfg     SchedulerConfig
-	now     func() time.Time
+	repo interfaces.Repository
+	jobs map[model.JobName]Job
+	cfg  SchedulerConfig
+	now  func() time.Time
 }
 
-func NewScheduler(repo interfaces.Repository, runners map[model.JobKind]JobRunner, cfg SchedulerConfig) (*Scheduler, error) {
+func NewScheduler(repo interfaces.Repository, jobs map[model.JobName]Job, cfg SchedulerConfig) (*Scheduler, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	for kind, r := range runners {
-		if r == nil {
-			return nil, goerr.New("job runner is nil", goerr.V("kind", kind))
+	for name, j := range jobs {
+		if j == nil {
+			return nil, goerr.New("job is nil", goerr.V("job", name))
 		}
 	}
-	return &Scheduler{repo: repo, runners: runners, cfg: cfg, now: time.Now}, nil
+	return &Scheduler{repo: repo, jobs: jobs, cfg: cfg, now: time.Now}, nil
 }
 
-// dueRun is the state of one RunDue. It lives only in that call.
-type dueRun struct {
-	mu     sync.Mutex
-	report SchedulerReport
-	slots  chan struct{}
-	runs   async.Group
-}
-
-func (d *dueRun) count(f func(r *SchedulerReport)) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	f(&d.report)
-}
-
-func (d *dueRun) snapshot() *SchedulerReport {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	out := d.report
-	return &out
-}
-
-func (d *dueRun) release() { <-d.slots }
-
-// RunDue claims and runs every due job once, waits for the runs it started,
-// and returns the counts. It is the only entry point of the scheduler, and it
-// does not depend on who calls it (a command now, an HTTP handler later).
-// When ctx is cancelled it stops claiming; runs already claimed continue
-// until they finish or reach RunTimeout. It returns an error, together with
-// the counts so far, when it could not handle every due job: the due jobs
-// could not be listed, or ctx ended first.
-func (s *Scheduler) RunDue(ctx context.Context) (*SchedulerReport, error) {
-	d := &dueRun{slots: make(chan struct{}, s.cfg.Concurrency)}
-	// A job is handled once per call even when its entry stays due, such as
-	// after a failed claim.
-	seen := make(map[model.JobID]bool)
-	err := s.claimDue(ctx, d, seen)
-	d.runs.Wait()
-	return d.snapshot(), err
-}
-
-// claimDue claims due jobs until none is left. It returns an error when it
-// stopped before that: the due jobs could not be listed, or ctx ended.
-func (s *Scheduler) claimDue(ctx context.Context, d *dueRun, seen map[model.JobID]bool) error {
-	stopped := func() error {
-		return goerr.Wrap(ctx.Err(), "stopped before every due job was handled")
+// RunDue claims and runs every due trigger once, waits for the runs it
+// started, and does not depend on who calls it (a command now, an HTTP
+// handler later). When ctx is cancelled it stops claiming; runs already
+// claimed continue until they finish or reach RunTimeout. It returns an error
+// when it could not handle every due trigger: the due triggers could not be
+// listed, one of them could not be claimed, or ctx ended first.
+func (s *Scheduler) RunDue(ctx context.Context) error {
+	entries, err := s.repo.JobSetting().ListDue(ctx, s.now())
+	if err != nil {
+		return goerr.Wrap(err, "failed to list due job triggers")
 	}
-	for {
-		if ctx.Err() != nil {
+
+	slots := make(chan struct{}, s.cfg.Concurrency)
+	var runs async.Group
+	defer runs.Wait()
+	var claimErrs []error
+	stopped := func(errs ...error) error {
+		return goerr.Wrap(errors.Join(append(append([]error{ctx.Err()}, errs...), claimErrs...)...),
+			"stopped before every due job trigger was handled")
+	}
+	for _, e := range entries {
+		select {
+		case slots <- struct{}{}:
+		case <-ctx.Done():
 			return stopped()
 		}
-		// Entries handled earlier in this call can still be due (a failed
-		// claim, a job that could not be read) and come first; reading that
-		// many more keeps them from hiding the entries after them.
-		entries, err := s.repo.Job().ListDue(ctx, s.now(), s.cfg.BatchSize+len(seen))
+		// select picks either case when both are ready.
+		if ctx.Err() != nil {
+			<-slots
+			return stopped()
+		}
+		run, job, err := s.claim(ctx, e)
 		if err != nil {
-			return goerr.Wrap(err, "failed to list due jobs")
-		}
-		handled := false
-		for _, e := range entries {
-			if seen[e.JobID] {
-				continue
-			}
-			seen[e.JobID] = true
-			handled = true
-			select {
-			case d.slots <- struct{}{}:
-			case <-ctx.Done():
-				return stopped()
-			}
-			// select picks either case when both are ready.
+			<-slots
 			if ctx.Err() != nil {
-				d.release()
-				return stopped()
+				return stopped(err)
 			}
-			s.claim(ctx, e, d)
+			// One trigger that cannot be claimed does not hold back the others.
+			claimErrs = append(claimErrs, err)
+			continue
 		}
-		if !handled {
-			return nil
+		if run == nil {
+			<-slots
+			continue
 		}
+		runs.Go(ctx, func(ctx context.Context) error {
+			defer func() { <-slots }()
+			return s.execute(ctx, job, run)
+		})
 	}
-}
-
-func jobRunVals(key model.UserKey, jobID model.JobID, runID model.JobRunID) []goerr.Option {
-	return []goerr.Option{
-		goerr.V("team_id", key.TeamID), goerr.V("user_id", key.UserID),
-		goerr.V("job_id", jobID), goerr.V("run_id", runID),
-	}
-}
-
-// claim takes the slot d holds for e and gives it back when the job is not
-// run, or when its run ends.
-func (s *Scheduler) claim(ctx context.Context, e *model.JobScheduleEntry, d *dueRun) {
-	key := e.Key()
-	fail := func(err error) {
-		d.release()
-		d.count(func(r *SchedulerReport) { r.Errors++ })
-		errutil.Handle(ctx, err, "due job was not handled")
-	}
-
-	job, err := s.repo.Job().Get(ctx, key, e.JobID)
-	if err != nil {
-		fail(goerr.Wrap(err, "failed to read due job", jobRunVals(key, e.JobID, "")...))
-		return
-	}
-	now := s.now()
-	scheduledAt := job.NextRunAt
-	runID := model.NewJobRunID(scheduledAt)
-	vals := jobRunVals(key, job.ID, runID)
-	// Another process claimed the job after the entry was read and moved
-	// it to a later run.
-	if scheduledAt.After(now) {
-		d.release()
-		d.count(func(r *SchedulerReport) { r.NotClaimed++ })
-		return
-	}
-	next, err := job.Schedule.Next(now)
-	if err != nil {
-		fail(goerr.Wrap(err, "failed to compute the next run", vals...))
-		return
-	}
-
-	run := &model.JobRun{
-		TeamID:      key.TeamID,
-		UserID:      key.UserID,
-		JobID:       job.ID,
-		ID:          runID,
-		Kind:        job.Kind,
-		ScheduledAt: scheduledAt,
-		StartedAt:   now,
-		ExpiresAt:   now.Add(s.cfg.RunTTL),
-	}
-	runner, hasRunner := s.runners[job.Kind]
-	switch {
-	case now.Sub(scheduledAt) > s.cfg.MaxDelay:
-		run.Status = model.JobRunSkipped
-		run.FinishedAt = now
-	case !hasRunner:
-		run.Status = model.JobRunFailed
-		run.Failure = model.JobRunNoRunner
-		run.FinishedAt = now
-	default:
-		run.Status = model.JobRunRunning
-		run.Deadline = now.Add(s.cfg.RunTimeout)
-	}
-
-	claimed, err := s.repo.Job().Claim(ctx, key, model.JobClaimRequest{
-		JobID:       job.ID,
-		ScheduledAt: scheduledAt,
-		NextRunAt:   next,
-		Run:         run,
-		Now:         now,
-	})
-	if err != nil {
-		fail(goerr.Wrap(err, "failed to claim due job", vals...))
-		return
-	}
-	if !claimed {
-		d.release()
-		d.count(func(r *SchedulerReport) { r.NotClaimed++ })
-		return
-	}
-
-	if run.Status != model.JobRunRunning {
-		d.release()
-		s.recordResult(ctx, run, d)
-		if run.Failure == model.JobRunNoRunner {
-			errutil.Handle(ctx, goerr.New("no runner for the job kind", append(vals, goerr.V("kind", job.Kind))...),
-				"job run failed")
-		}
-		return
-	}
-
-	logging.From(ctx).Info("job run started",
-		slog.String("job_id", string(job.ID)), slog.String("run_id", string(runID)),
-		slog.String("kind", string(job.Kind)), slog.Time("scheduled_at", scheduledAt))
-	d.runs.Go(ctx, func(ctx context.Context) error {
-		defer d.release()
-		return s.execute(ctx, key, job, run, runner, d)
-	})
-}
-
-// execute calls the runner and records its result. ctx is not cancelled with
-// the caller of RunDue; the run ends at RunTimeout.
-func (s *Scheduler) execute(ctx context.Context, key model.UserKey, job *model.Job, run *model.JobRun, runner JobRunner, d *dueRun) error {
-	rctx, cancel := context.WithTimeout(ctx, s.cfg.RunTimeout)
-	defer cancel()
-
-	res, err := runner.Run(rctx, JobRunRequest{Key: key, Job: *job, RunID: run.ID, ScheduledAt: run.ScheduledAt})
-	run.FinishedAt = s.now()
-	if res != nil {
-		run.MessageTS = res.MessageTS
-		run.Spent = res.Spent
-	}
-	switch {
-	case err == nil:
-		run.Status = model.JobRunSucceeded
-	case errors.Is(rctx.Err(), context.DeadlineExceeded):
-		run.Status = model.JobRunFailed
-		run.Failure = model.JobRunTimedOut
-	default:
-		run.Status = model.JobRunFailed
-		run.Failure = model.JobRunRunFailed
-	}
-
-	fctx, fcancel := context.WithTimeout(context.WithoutCancel(ctx), finishTimeout)
-	defer fcancel()
-	if ferr := s.repo.Job().Finish(fctx, key, run); ferr != nil {
-		errutil.Handle(ctx, goerr.Wrap(ferr, "failed to record the job run", jobRunVals(key, job.ID, run.ID)...),
-			"job run result was not saved")
-	}
-	s.recordResult(ctx, run, d)
-
-	if err != nil {
-		return goerr.Wrap(err, "job run failed", append(jobRunVals(key, job.ID, run.ID), goerr.V("failure", run.Failure))...)
+	if len(claimErrs) > 0 {
+		return goerr.Wrap(errors.Join(claimErrs...), "failed to claim due job triggers", goerr.V("failed", len(claimErrs)))
 	}
 	return nil
 }
 
-func (s *Scheduler) recordResult(ctx context.Context, run *model.JobRun, d *dueRun) {
-	d.count(func(r *SchedulerReport) {
-		switch run.Status {
-		case model.JobRunSucceeded:
-			r.Succeeded++
-		case model.JobRunSkipped:
-			r.Skipped++
-		default:
-			r.Failed++
+func triggerVals(key model.UserKey, id model.JobTriggerID) []goerr.Option {
+	return []goerr.Option{goerr.V("team_id", key.TeamID), goerr.V("user_id", key.UserID), goerr.V("trigger_id", id)}
+}
+
+// claim moves the trigger of e to its next time, when no other process did,
+// and returns the run to start. It returns no run and no error when there is
+// nothing to run: another process claimed the trigger, the trigger is gone,
+// the job is not defined, or the run is later than the job allows.
+func (s *Scheduler) claim(ctx context.Context, e *model.JobScheduleEntry) (*JobRequest, Job, error) {
+	key := e.Key()
+	now := s.now()
+	var run *JobRequest
+	var jobName model.JobName
+	err := s.repo.JobSetting().Update(ctx, key, func(cur *model.JobSetting) (*model.JobSetting, error) {
+		run = nil
+		if cur == nil {
+			return nil, nil
 		}
+		t := cur.Trigger(e.TriggerID)
+		if t == nil || !t.NextRunAt.Equal(e.NextRunAt) {
+			return nil, nil
+		}
+		loc, err := cur.Location()
+		if err != nil {
+			return nil, err
+		}
+		run = &JobRequest{Key: key, TriggerID: t.ID, ChannelID: cur.ChannelID, TimeZone: cur.TimeZone, ScheduledAt: t.NextRunAt}
+		jobName = t.Job
+		t.NextRunAt = t.Time.Next(now, loc)
+		return cur, nil
 	})
-	logging.From(ctx).Info("job run finished",
-		slog.String("job_id", string(run.JobID)), slog.String("run_id", string(run.ID)),
-		slog.String("kind", string(run.Kind)), slog.String("status", string(run.Status)),
-		slog.String("failure", string(run.Failure)), slog.Int64("spent_nano_usd", int64(run.Spent)))
+	if err != nil {
+		return nil, nil, goerr.Wrap(err, "failed to claim job trigger", triggerVals(key, e.TriggerID)...)
+	}
+	if run == nil {
+		return nil, nil, nil
+	}
+
+	log := logging.From(ctx).With(slog.String("trigger_id", string(run.TriggerID)), slog.String("job", string(jobName)),
+		slog.Time("scheduled_at", run.ScheduledAt))
+	job, ok := s.jobs[jobName]
+	if !ok {
+		errutil.Handle(ctx, goerr.New("job is not defined in this build", append(triggerVals(key, run.TriggerID), goerr.V("job", jobName))...),
+			"job trigger was not run")
+		return nil, nil, nil
+	}
+	if late := now.Sub(run.ScheduledAt); job.MaxDelay() > 0 && late > job.MaxDelay() {
+		log.Info("job run skipped", slog.Duration("late", late), slog.Duration("max_delay", job.MaxDelay()))
+		return nil, nil, nil
+	}
+	log.Info("job run started")
+	return run, job, nil
+}
+
+// execute runs the job within RunTimeout. ctx is not cancelled with the
+// caller of RunDue.
+func (s *Scheduler) execute(ctx context.Context, job Job, run *JobRequest) error {
+	rctx, cancel := context.WithTimeout(ctx, s.cfg.RunTimeout)
+	defer cancel()
+	if err := job.Run(rctx, *run); err != nil {
+		return goerr.Wrap(err, "job run failed", triggerVals(run.Key, run.TriggerID)...)
+	}
+	logging.From(ctx).Info("job run finished", slog.String("trigger_id", string(run.TriggerID)))
+	return nil
 }

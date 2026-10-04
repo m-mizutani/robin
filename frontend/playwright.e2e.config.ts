@@ -24,12 +24,6 @@ export const e2eNotionClientID = 'e2e-notion-client'
 const e2eNotionClientSecret = 'e2e-notion-secret'
 export const e2eNotionWorkspaceID = '0f4a2b1c-3d4e-4f50-8a6b-7c8d9e0f1a2b'
 
-// The Slack Web API of the bot is served by e2e/fake-slack.mjs, so adding a
-// scheduled message runs the channel checks against it. A bot token needs a
-// signing secret with --no-auth, and Slack events need an LLM credential; the
-// tests send no events, so the API key is never used.
-export const fakeSlackURL = 'http://127.0.0.1:18083'
-
 export default defineConfig({
   testDir: './e2e/tests',
   outputDir: './test-results/e2e',
@@ -54,12 +48,6 @@ export default defineConfig({
       reuseExistingServer: false,
     },
     {
-      command: 'node e2e/fake-slack.mjs',
-      env: { FAKE_SLACK_PORT: '18083', FAKE_SLACK_USER_ID: e2eUserID },
-      url: `${fakeSlackURL}/__control`,
-      reuseExistingServer: false,
-    },
-    {
       command: [
         binary,
         '--log-format json',
@@ -77,10 +65,6 @@ export default defineConfig({
         `--notion-api-url ${fakeNotionURL}`,
         `--github-client-id ${e2eGitHubClientID}`,
         '--github-client-secret e2e-client-secret',
-        '--slack-bot-token xoxb-e2e',
-        '--slack-signing-secret e2e-signing-secret',
-        '--anthropic-api-key e2e-unused',
-        `--slack-api-url ${fakeSlackURL}/api/`,
       ].join(' '),
       url: `${baseURL}/login`,
       reuseExistingServer: false,
