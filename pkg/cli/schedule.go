@@ -32,8 +32,8 @@ func (c *scheduleConfig) flags() []cli.Flag {
 }
 
 func (c *scheduleConfig) validate() error {
-	// The jobs are written by serve; an in-memory repository of this process
-	// is always empty.
+	// The job settings are written by serve; an in-memory repository of this
+	// process is always empty.
 	if c.repository.IsMemory() {
 		return goerr.New("schedule needs the firestore repository that serve uses")
 	}
