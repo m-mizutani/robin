@@ -1,4 +1,4 @@
-package usecase
+package mention
 
 import (
 	"context"
@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/m-mizutani/robin/pkg/domain/model"
+	"github.com/m-mizutani/robin/pkg/usecase"
 )
 
 type googleSearchInput struct {
@@ -43,7 +44,7 @@ func googleResult[T any](v T, err error) (string, error) {
 	return toJSON(v)
 }
 
-func googleTools(google *GoogleWorkspaceAccess) []*agentTool {
+func googleTools(google GoogleReader) []*agentTool {
 	searchSchema := func(queryDescription string) string {
 		return `{"type":"object","properties":{
 			"query":{"type":"string","description":"` + queryDescription + `"},
@@ -72,7 +73,7 @@ func googleTools(google *GoogleWorkspaceAccess) []*agentTool {
 				in, _ := decodeInput[googleSearchInput](input)
 				return "Searching Gmail for " + quoted(in.Query)
 			},
-			run: func(ctx context.Context, req AgentRequest, input json.RawMessage) (string, error) {
+			run: func(ctx context.Context, req usecase.MentionRequest, input json.RawMessage) (string, error) {
 				in, n, err := decodeSearch(input)
 				if err != nil {
 					return "", err
@@ -85,7 +86,7 @@ func googleTools(google *GoogleWorkspaceAccess) []*agentTool {
 			spec: modelToolSpec("gmail_get_message", "Read the body of one email.",
 				`{"type":"object","properties":{"message_id":{"type":"string","description":"ID from gmail_search."}},"required":["message_id"]}`),
 			describe: func(json.RawMessage) string { return "Reading an email" },
-			run: func(ctx context.Context, req AgentRequest, input json.RawMessage) (string, error) {
+			run: func(ctx context.Context, req usecase.MentionRequest, input json.RawMessage) (string, error) {
 				in, err := decodeInput[googleIDInput](input)
 				if err != nil {
 					return "", err
@@ -105,7 +106,7 @@ func googleTools(google *GoogleWorkspaceAccess) []*agentTool {
 				in, _ := decodeInput[googleSearchInput](input)
 				return "Searching Google Drive for " + quoted(in.Query)
 			},
-			run: func(ctx context.Context, req AgentRequest, input json.RawMessage) (string, error) {
+			run: func(ctx context.Context, req usecase.MentionRequest, input json.RawMessage) (string, error) {
 				in, n, err := decodeSearch(input)
 				if err != nil {
 					return "", err
@@ -119,7 +120,7 @@ func googleTools(google *GoogleWorkspaceAccess) []*agentTool {
 				"Read a Google Docs, Sheets (as CSV) or Slides file, or a text file, as text. Other file types such as PDF cannot be read.",
 				`{"type":"object","properties":{"file_id":{"type":"string","description":"ID from drive_search."}},"required":["file_id"]}`),
 			describe: func(json.RawMessage) string { return "Reading a Google Drive file" },
-			run: func(ctx context.Context, req AgentRequest, input json.RawMessage) (string, error) {
+			run: func(ctx context.Context, req usecase.MentionRequest, input json.RawMessage) (string, error) {
 				in, err := decodeInput[googleIDInput](input)
 				if err != nil {
 					return "", err
@@ -141,7 +142,7 @@ func googleTools(google *GoogleWorkspaceAccess) []*agentTool {
 					"max_results":{"type":"integer","minimum":1,"maximum":50,"description":"Number of events, 25 when omitted."}
 				},"required":["time_min","time_max"]}`),
 			describe: func(json.RawMessage) string { return "Checking Google Calendar" },
-			run: func(ctx context.Context, req AgentRequest, input json.RawMessage) (string, error) {
+			run: func(ctx context.Context, req usecase.MentionRequest, input json.RawMessage) (string, error) {
 				in, err := decodeInput[calendarInput](input)
 				if err != nil {
 					return "", err

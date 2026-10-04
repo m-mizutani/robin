@@ -1,4 +1,4 @@
-package usecase
+package mention
 
 import (
 	"context"
@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/m-mizutani/robin/pkg/domain/interfaces"
+	"github.com/m-mizutani/robin/pkg/usecase"
 )
 
 type githubSearchInput struct {
@@ -27,7 +28,7 @@ type githubFileInput struct {
 }
 
 // callGitHub runs fn with a client of the user's token, refreshed when needed.
-func callGitHub[T any](ctx context.Context, github *GitHubUserAccess, req AgentRequest, fn func(interfaces.GitHubUserClient) (T, error)) (string, error) {
+func callGitHub[T any](ctx context.Context, github GitHubReader, req usecase.MentionRequest, fn func(interfaces.GitHubUserClient) (T, error)) (string, error) {
 	client, err := github.Client(ctx, req.Key)
 	if err != nil {
 		return "", err
@@ -39,7 +40,7 @@ func callGitHub[T any](ctx context.Context, github *GitHubUserAccess, req AgentR
 	return toJSON(v)
 }
 
-func githubTools(github *GitHubUserAccess) []*agentTool {
+func githubTools(github GitHubReader) []*agentTool {
 	searchSchema := `{"type":"object","properties":{
 		"query":{"type":"string","description":"GitHub search query, for example ` + "`repo:owner/name is:open label:bug`" + `."},
 		"max_results":{"type":"integer","minimum":1,"maximum":30,"description":"Number of results, 10 when omitted."}
@@ -64,7 +65,7 @@ func githubTools(github *GitHubUserAccess) []*agentTool {
 				in, _ := decodeInput[githubSearchInput](input)
 				return "Searching GitHub issues for " + quoted(in.Query)
 			},
-			run: func(ctx context.Context, req AgentRequest, input json.RawMessage) (string, error) {
+			run: func(ctx context.Context, req usecase.MentionRequest, input json.RawMessage) (string, error) {
 				in, n, err := decodeSearch(input)
 				if err != nil {
 					return "", err
@@ -81,7 +82,7 @@ func githubTools(github *GitHubUserAccess) []*agentTool {
 				in, _ := decodeInput[githubSearchInput](input)
 				return "Searching GitHub code for " + quoted(in.Query)
 			},
-			run: func(ctx context.Context, req AgentRequest, input json.RawMessage) (string, error) {
+			run: func(ctx context.Context, req usecase.MentionRequest, input json.RawMessage) (string, error) {
 				in, n, err := decodeSearch(input)
 				if err != nil {
 					return "", err
@@ -103,7 +104,7 @@ func githubTools(github *GitHubUserAccess) []*agentTool {
 				in, _ := decodeInput[githubIssueInput](input)
 				return fmt.Sprintf("Reading %s/%s#%d", in.Owner, in.Repo, in.Number)
 			},
-			run: func(ctx context.Context, req AgentRequest, input json.RawMessage) (string, error) {
+			run: func(ctx context.Context, req usecase.MentionRequest, input json.RawMessage) (string, error) {
 				in, err := decodeInput[githubIssueInput](input)
 				if err != nil {
 					return "", err
@@ -135,7 +136,7 @@ func githubTools(github *GitHubUserAccess) []*agentTool {
 				in, _ := decodeInput[githubFileInput](input)
 				return fmt.Sprintf("Reading %s/%s/%s", in.Owner, in.Repo, truncateText(in.Path, progressQueryChars))
 			},
-			run: func(ctx context.Context, req AgentRequest, input json.RawMessage) (string, error) {
+			run: func(ctx context.Context, req usecase.MentionRequest, input json.RawMessage) (string, error) {
 				in, err := decodeInput[githubFileInput](input)
 				if err != nil {
 					return "", err

@@ -1,10 +1,11 @@
-package usecase
+package mention
 
 import (
 	"context"
 	"encoding/json"
 
 	"github.com/m-mizutani/robin/pkg/domain/model"
+	"github.com/m-mizutani/robin/pkg/usecase"
 )
 
 // notionPageSize is the number of results one Notion list call returns.
@@ -78,7 +79,7 @@ func notionList(list *model.NotionList, err error) (string, error) {
 
 const cursorProperty = `"start_cursor":{"type":"string","description":"next_cursor of the previous result, to read the next page."}`
 
-func notionTools(notion *NotionAccess) []*agentTool {
+func notionTools(notion NotionReader) []*agentTool {
 	idTool := func(name, description, idName, idDescription, progress string,
 		call func(ctx context.Context, key model.UserKey, in notionIDInput) (string, error)) *agentTool {
 		return &agentTool{
@@ -86,7 +87,7 @@ func notionTools(notion *NotionAccess) []*agentTool {
 			spec: modelToolSpec(name, description,
 				`{"type":"object","properties":{"`+idName+`":{"type":"string","description":"`+idDescription+`"}},"required":["`+idName+`"]}`),
 			describe: func(json.RawMessage) string { return progress },
-			run: func(ctx context.Context, req AgentRequest, input json.RawMessage) (string, error) {
+			run: func(ctx context.Context, req usecase.MentionRequest, input json.RawMessage) (string, error) {
 				in, err := decodeInput[notionIDInput](input)
 				if err != nil {
 					return "", err
@@ -110,7 +111,7 @@ func notionTools(notion *NotionAccess) []*agentTool {
 				in, _ := decodeInput[notionSearchInput](input)
 				return "Searching Notion for " + quoted(in.Query)
 			},
-			run: func(ctx context.Context, req AgentRequest, input json.RawMessage) (string, error) {
+			run: func(ctx context.Context, req usecase.MentionRequest, input json.RawMessage) (string, error) {
 				in, err := decodeInput[notionSearchInput](input)
 				if err != nil {
 					return "", err
@@ -144,7 +145,7 @@ func notionTools(notion *NotionAccess) []*agentTool {
 					`+cursorProperty+`
 				},"required":["block_id"]}`),
 			describe: func(json.RawMessage) string { return "Reading Notion page content" },
-			run: func(ctx context.Context, req AgentRequest, input json.RawMessage) (string, error) {
+			run: func(ctx context.Context, req usecase.MentionRequest, input json.RawMessage) (string, error) {
 				in, err := decodeInput[notionIDInput](input)
 				if err != nil {
 					return "", err
@@ -186,7 +187,7 @@ func notionTools(notion *NotionAccess) []*agentTool {
 					`+cursorProperty+`
 				},"required":["data_source_id"]}`),
 			describe: func(json.RawMessage) string { return "Querying a Notion data source" },
-			run: func(ctx context.Context, req AgentRequest, input json.RawMessage) (string, error) {
+			run: func(ctx context.Context, req usecase.MentionRequest, input json.RawMessage) (string, error) {
 				in, err := decodeInput[notionQueryInput](input)
 				if err != nil {
 					return "", err

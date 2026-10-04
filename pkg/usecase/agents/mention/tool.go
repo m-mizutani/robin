@@ -1,4 +1,4 @@
-package usecase
+package mention
 
 import (
 	"bytes"
@@ -13,6 +13,7 @@ import (
 
 	"github.com/m-mizutani/robin/pkg/domain/interfaces"
 	"github.com/m-mizutani/robin/pkg/domain/model"
+	"github.com/m-mizutani/robin/pkg/usecase"
 	"github.com/m-mizutani/robin/pkg/utils/errutil"
 )
 
@@ -24,7 +25,7 @@ type agentTool struct {
 	// describe writes one progress line for a call.
 	describe func(input json.RawMessage) string
 	// run returns the JSON text given to the model.
-	run func(ctx context.Context, req AgentRequest, input json.RawMessage) (string, error)
+	run func(ctx context.Context, req usecase.MentionRequest, input json.RawMessage) (string, error)
 }
 
 // agentToolInputError carries a message written by Robin that is safe to
@@ -97,9 +98,10 @@ func toolErrorText(ctx context.Context, tool *agentTool, settingsURL string, err
 	switch {
 	case errors.As(err, &inErr):
 		return inErr.msg
-	case errors.Is(err, ErrNotionNotConnected), errors.Is(err, ErrGoogleWorkspaceNotConnected), errors.Is(err, ErrGitHubNotConnected):
+	case errors.Is(err, usecase.ErrNotionNotConnected), errors.Is(err, usecase.ErrGoogleWorkspaceNotConnected),
+		errors.Is(err, usecase.ErrGitHubNotConnected):
 		return fmt.Sprintf("%s is not connected. The user can connect it at %s.", tool.service, settingsURL)
-	case errors.Is(err, ErrNotionReconnectRequired), errors.Is(err, ErrGoogleWorkspaceReconnectRequired),
+	case errors.Is(err, usecase.ErrNotionReconnectRequired), errors.Is(err, usecase.ErrGoogleWorkspaceReconnectRequired),
 		errors.Is(err, interfaces.ErrGitHubTokenInvalid), errors.Is(err, interfaces.ErrSlackTokenInvalid):
 		return fmt.Sprintf("%s rejected the stored connection. The user has to reconnect it at %s.", tool.service, settingsURL)
 	case errors.Is(err, interfaces.ErrNotionNotFound), errors.Is(err, interfaces.ErrNotionForbidden),
@@ -107,7 +109,7 @@ func toolErrorText(ctx context.Context, tool *agentTool, settingsURL string, err
 		return "Not found, or not shared with this user."
 	case errors.Is(err, interfaces.ErrNotionRateLimited):
 		return "Rate limited by Notion. Try again later."
-	case errors.Is(err, ErrNotionInvalidRequest):
+	case errors.Is(err, usecase.ErrNotionInvalidRequest):
 		return "Invalid request."
 	case errors.Is(err, interfaces.ErrGoogleUnsupportedFile):
 		return "This file type cannot be read as text."
@@ -130,7 +132,7 @@ func modelToolSpec(name, description, inputSchema string) model.LLMToolSpec {
 // buildAgentTools lists the tools of the integrations enabled on this server.
 // The list is the same for every user and run: the model treats its earlier
 // reasoning as invalid when the tools change.
-func buildAgentTools(services AgentServices) []*agentTool {
+func buildAgentTools(services Services) []*agentTool {
 	tools := slackTools()
 	if services.Notion != nil {
 		tools = append(tools, notionTools(services.Notion)...)

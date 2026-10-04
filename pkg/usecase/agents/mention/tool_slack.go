@@ -1,10 +1,12 @@
-package usecase
+package mention
 
 import (
 	"context"
 	"encoding/json"
 
 	"github.com/m-mizutani/goerr/v2"
+
+	"github.com/m-mizutani/robin/pkg/usecase"
 )
 
 type slackSearchInput struct {
@@ -37,7 +39,7 @@ func slackTools() []*agentTool {
 			in, _ := decodeInput[slackSearchInput](input)
 			return "Searching Slack for " + quoted(in.Query)
 		},
-		run: func(ctx context.Context, req AgentRequest, input json.RawMessage) (string, error) {
+		run: func(ctx context.Context, req usecase.MentionRequest, input json.RawMessage) (string, error) {
 			in, err := decodeInput[slackSearchInput](input)
 			if err != nil {
 				return "", err

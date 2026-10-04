@@ -1,8 +1,7 @@
-package usecase
+package mention
 
 import (
 	"fmt"
-	"math/rand/v2"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -10,30 +9,8 @@ import (
 	"github.com/m-mizutani/robin/pkg/domain/model"
 )
 
-// startPhrases are the first text of a progress message, one chosen at random
-// per mention.
-var startPhrases = []string{
-	"Thinking...",
-	"Pondering...",
-	"Mulling it over...",
-	"Looking into it...",
-	"Getting my bearings...",
-	"Reading the thread...",
-	"Working on it...",
-	"Gathering context...",
-	"Connecting the dots...",
-	"On it...",
-	"Taking a look...",
-	"Sorting things out...",
-	"Collecting my thoughts...",
-	"Considering the request...",
-	"Digging in...",
-	"Piecing it together...",
-}
-
-func startPhrase() string {
-	return startPhrases[rand.IntN(len(startPhrases))]
-}
+// The progress message is posted by the Slack event handler with its first
+// text; the agent replaces that text from then on.
 
 const (
 	// progressNoteChars bounds a note of the model shown as progress.
@@ -55,19 +32,12 @@ func progressNote(text string) string {
 	return ":thought_balloon: " + truncateText(strings.Join(strings.Fields(text), " "), progressNoteChars)
 }
 
-func progressStart() string {
-	return ":thought_balloon: " + startPhrase()
-}
-
 func progressTool(description string) string {
 	return ":mag: " + description
 }
 
 const (
-	progressSignIn       = ":lock: Sign in to Robin to use me"
-	progressStartFailed  = ":warning: Couldn't start this request. Please mention me again."
 	progressBusy         = ":hourglass_flowing_sand: Still working on your previous request in this thread"
-	progressNotOwner     = ":no_entry_sign: Only the person who started this conversation can continue it"
 	progressIncompatible = ":no_entry_sign: Can't continue this conversation"
 )
 
@@ -120,10 +90,8 @@ func formatDuration(d time.Duration) string {
 	return d.String()
 }
 
-// Replies posted in the thread or sent as ephemeral messages.
+// Replies posted in the thread when a run ends without an answer.
 const (
-	notOwnerText = "In this thread, I only answer the person who started the conversation with me. " +
-		"Mention me in a new thread to start your own."
 	declinedText        = "I can't help with this request."
 	noAnswerText        = "I couldn't write an answer to this request. Please ask again, or narrow it down."
 	failedText          = "I couldn't finish this request because of an internal error."

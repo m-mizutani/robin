@@ -18,6 +18,14 @@ GraphQL.
   reads, refreshing the tokens when Notion rejects them), and
   `GitHubUserAccess` is the only one for GitHub user and refresh tokens (it
   refreshes them before they expire, one instance at a time through a lease).
+- `pkg/usecase/agents/{name}/` — one package per LLM agent (`mention` answers
+  Slack mentions). An agent imports `pkg/usecase` and reads the integrations
+  through narrow interfaces it defines, which the Access components satisfy;
+  `pkg/usecase` never imports an agent and calls it through an interface it
+  defines (`MentionAgent`). `pkg/cli` wires them.
+- `pkg/usecase/usecasetest/` — test doubles of domain interfaces (Slack bot,
+  LLM) shared by the tests of `pkg/usecase` and the agents. Imported only by
+  tests.
 - `pkg/domain/` — models (`model/`, also the Firestore document format) and
   interfaces (`interfaces/`). No I/O.
 - `pkg/repository/{firestore,memory}/` — persistence.
@@ -25,7 +33,7 @@ GraphQL.
   implement `domain/interfaces` over an external API. No business decisions.
   `pkg/adapter/localcipher/` replaces KMS only with `--no-auth` and no KMS key.
   `claude` implements the LLM boundary (`interfaces.LLMClient`); the usecase
-  never imports a provider's SDK.
+  layer, agents included, never imports a provider's SDK.
 - Every API route is under `/api/v1` (`apiV1Path` in
   `pkg/controller/http/auth.go`); only the SPA, `/hooks/slack/event`, and
   `/hooks/slack/interaction` are outside it.

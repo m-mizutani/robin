@@ -1,4 +1,6 @@
-package usecase
+// Package mention is the agent that answers a Slack mention in its thread
+// with a model that reads the requester's connected services.
+package mention
 
 import (
 	"context"
@@ -11,15 +13,20 @@ import (
 
 	"github.com/m-mizutani/robin/pkg/domain/interfaces"
 	"github.com/m-mizutani/robin/pkg/domain/model"
+	"github.com/m-mizutani/robin/pkg/usecase"
 	"github.com/m-mizutani/robin/pkg/utils/errutil"
 	"github.com/m-mizutani/robin/pkg/utils/logging"
 )
 
-// agentSlackTimeout bounds each Slack call and lease release made after the
+// slackTimeout bounds each Slack call and lease release made after the
 // run's own deadline, so the reply still reaches the thread after a timeout.
-const agentSlackTimeout = 30 * time.Second
+const slackTimeout = 30 * time.Second
 
-type AgentConfig struct {
+// ErrSessionLeaseLost means another run took the session's lease before this
+// run committed.
+var ErrSessionLeaseLost = errors.New("agent session lease was lost")
+
+type Config struct {
 	BaseURL         string // for the settings URL
 	Rate            model.Rate
 	Budget          model.NanoUSD
@@ -37,7 +44,7 @@ type AgentConfig struct {
 	HistoryByteLimit int
 }
 
-func (c AgentConfig) Validate() error {
+func (c Config) Validate() error {
 	if c.BaseURL == "" {
 		return goerr.New("empty agent base URL")
 	}
@@ -64,19 +71,11 @@ func (c AgentConfig) Validate() error {
 	return nil
 }
 
-func (c AgentConfig) settingsURL() string {
+func (c Config) settingsURL() string {
 	return c.BaseURL + "/settings"
 }
 
-// AgentServices holds the read access of each integration; nil means the
-// integration is disabled on this server.
-type AgentServices struct {
-	Notion *NotionAccess
-	Google *GoogleWorkspaceAccess
-	GitHub *GitHubUserAccess
-}
-
-func (s AgentServices) names() []string {
+func (s Services) names() []string {
 	names := []string{"Slack messages"}
 	if s.Notion != nil {
 		names = append(names, "Notion")
@@ -96,8 +95,8 @@ type Agent struct {
 	repo         interfaces.Repository
 	llm          interfaces.LLMClient
 	bot          interfaces.SlackBot
-	services     AgentServices
-	cfg          AgentConfig
+	services     Services
+	cfg          Config
 	tools        []*agentTool
 	toolByName   map[string]*agentTool
 	toolSpecs    []model.LLMToolSpec
@@ -106,8 +105,10 @@ type Agent struct {
 	newID        func() string
 }
 
-func NewAgent(repo interfaces.Repository, llm interfaces.LLMClient, bot interfaces.SlackBot,
-	services AgentServices, cfg AgentConfig) (*Agent, error) {
+var _ usecase.MentionAgent = &Agent{}
+
+func New(repo interfaces.Repository, llm interfaces.LLMClient, bot interfaces.SlackBot,
+	services Services, cfg Config) (*Agent, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -137,18 +138,6 @@ func NewAgent(repo interfaces.Repository, llm interfaces.LLMClient, bot interfac
 	return a, nil
 }
 
-// AgentRequest is one mention whose sender already passed the Slack checks.
-type AgentRequest struct {
-	Key        model.UserKey
-	Slack      *UserClient // the sender's own Slack client
-	ChannelID  string
-	ThreadTS   string // thread to answer in
-	MentionTS  string
-	InThread   bool // the mention was posted inside an existing thread
-	Text       string
-	ProgressTS string // progress message posted by SlackEventUseCase
-}
-
 // OwnedByOther reports whether another user owns the conversation of the thread.
 func (a *Agent) OwnedByOther(ctx context.Context, key model.UserKey, channelID, threadTS string) (bool, error) {
 	id, err := model.NewAgentSessionID(key.TeamID, channelID, threadTS)
@@ -162,9 +151,8 @@ func (a *Agent) OwnedByOther(ctx context.Context, key model.UserKey, channelID, 
 	return owned, nil
 }
 
-// Run answers the mention. It posts the reply and the final progress itself
-// and returns an error only for a failure that also has to be recorded.
-func (a *Agent) Run(ctx context.Context, req AgentRequest) error {
+// Run answers the mention; see usecase.MentionAgent.
+func (a *Agent) Run(ctx context.Context, req usecase.MentionRequest) error {
 	r := &agentRun{
 		agent: a,
 		req:   req,
@@ -182,7 +170,7 @@ func (a *Agent) Run(ctx context.Context, req AgentRequest) error {
 // run.
 type agentRun struct {
 	agent        *Agent
-	req          AgentRequest
+	req          usecase.MentionRequest
 	meter        *budgetMeter
 	toolCalls    int
 	sessionID    model.AgentSessionID
@@ -217,10 +205,10 @@ func (r *agentRun) vals() []goerr.Option {
 // endContext returns the context of the calls that end the run: the last
 // progress update, the reply, the commit and the lease release. It outlives
 // the run's deadline so a timed out run can still report it, and all of those
-// calls share one agentSlackTimeout, which is shorter than the lease margin.
+// calls share one slackTimeout, which is shorter than the lease margin.
 func (r *agentRun) endContext(ctx context.Context) context.Context {
 	if r.ending == nil {
-		r.ending, r.cancelEnding = context.WithTimeout(context.WithoutCancel(ctx), agentSlackTimeout)
+		r.ending, r.cancelEnding = context.WithTimeout(context.WithoutCancel(ctx), slackTimeout)
 	}
 	return r.ending
 }
@@ -239,7 +227,7 @@ func (r *agentRun) progress(ctx context.Context, text string) {
 	if r.progressGone || ctx.Err() != nil {
 		return
 	}
-	sctx, cancel := context.WithTimeout(ctx, agentSlackTimeout)
+	sctx, cancel := context.WithTimeout(ctx, slackTimeout)
 	defer cancel()
 	err := r.agent.bot.UpdateProgress(sctx, r.req.ChannelID, r.req.ProgressTS, r.req.Key.UserID, text)
 	switch {
@@ -346,11 +334,10 @@ func (r *agentRun) run(ctx context.Context) error {
 
 	switch begun.Status {
 	case model.AgentSessionOwnedByOther:
-		r.end(ctx, resultNotOwner, "", progressNotOwner)
-		if err := a.bot.PostEphemeral(r.endContext(ctx), r.req.ChannelID, r.req.Key.UserID, r.req.ThreadTS, notOwnerText); err != nil {
-			return goerr.Wrap(err, "failed to tell the user that another user owns the thread", r.vals()...)
-		}
-		return nil
+		// The Slack event handler tells the user, as it does when it finds
+		// the owner before the run starts.
+		r.finish(ctx, resultNotOwner)
+		return goerr.Wrap(usecase.ErrThreadOwnedByOther, "another user started the conversation of the thread", r.vals()...)
 	case model.AgentSessionBusy:
 		r.end(ctx, resultBusy, "", progressBusy)
 		return nil
@@ -589,7 +576,7 @@ func (r *agentRun) complete(ctx context.Context, llm interfaces.LLMSession, leas
 	if !ok {
 		// The answer stands; only another run that took the session after
 		// the lease expired keeps the conversation.
-		return false, goerr.Wrap(ErrAgentSessionLeaseLost, "another run took the session before this run saved it", r.vals()...)
+		return false, goerr.Wrap(ErrSessionLeaseLost, "another run took the session before this run saved it", r.vals()...)
 	}
 	return true, nil
 }

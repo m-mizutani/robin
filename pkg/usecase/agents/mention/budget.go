@@ -1,4 +1,4 @@
-package usecase
+package mention
 
 import (
 	"fmt"

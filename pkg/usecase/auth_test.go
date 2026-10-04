@@ -16,6 +16,7 @@ import (
 	"github.com/m-mizutani/robin/pkg/domain/model/auth"
 	"github.com/m-mizutani/robin/pkg/repository/memory"
 	"github.com/m-mizutani/robin/pkg/usecase"
+	"github.com/m-mizutani/robin/pkg/usecase/usecasetest"
 )
 
 const (
@@ -55,7 +56,7 @@ type authFixture struct {
 	repo    *memory.Memory
 	cipher  *fakeCipher
 	oauth   *fakeOAuth
-	bot     *fakeBot
+	bot     *usecasetest.SlackBot
 	factory *fakeUserClientFactory
 	access  *usecase.SlackUserAccess
 	uc      *usecase.AuthUseCase
@@ -68,11 +69,11 @@ func newAuthFixture(t *testing.T) *authFixture {
 		repo:    memory.New(),
 		cipher:  &fakeCipher{},
 		oauth:   &fakeOAuth{result: validOAuthResult()},
-		bot:     newFakeBot(),
+		bot:     usecasetest.NewSlackBot(),
 		factory: newFakeUserClientFactory(),
 		now:     time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC),
 	}
-	f.bot.names[testKey.UserID] = "Alice Example"
+	f.bot.Names[testKey.UserID] = "Alice Example"
 	f.factory.identities[testUserToken] = &model.SlackIdentity{TeamID: testKey.TeamID, UserID: testKey.UserID}
 	f.access = usecase.NewSlackUserAccess(f.repo, f.cipher, f.factory)
 	f.uc = usecase.NewAuthUseCase(f.repo, f.oauth, f.bot, f.access, f.factory, usecase.AuthConfig{
@@ -172,7 +173,7 @@ func TestAuthUseCase_HandleCallbackRejected(t *testing.T) {
 func TestAuthUseCase_HandleCallbackFailures(t *testing.T) {
 	cases := map[string]func(f *authFixture){
 		"code exchange fails": func(f *authFixture) { f.oauth.err = errors.New("slack unavailable") },
-		"users.info fails":    func(f *authFixture) { f.bot.nameErr = errors.New("user_not_found") },
+		"users.info fails":    func(f *authFixture) { f.bot.NameErr = errors.New("user_not_found") },
 		"encryption fails":    func(f *authFixture) { f.cipher.encryptErr = errors.New("kms unavailable") },
 	}
 	for name, mutate := range cases {
@@ -200,7 +201,7 @@ func TestAuthUseCase_HandleCallbackTwice(t *testing.T) {
 	gt.NoError(t, err).Required()
 
 	f.now = first.Add(time.Hour)
-	f.bot.names[testKey.UserID] = "Alice Renamed"
+	f.bot.Names[testKey.UserID] = "Alice Renamed"
 	f.oauth.result.AccessToken = "xoxp-second-token"
 	f.factory.identities["xoxp-second-token"] = &model.SlackIdentity{TeamID: testKey.TeamID, UserID: testKey.UserID}
 	session2, _, err := f.uc.HandleCallback(ctx, "code-2")

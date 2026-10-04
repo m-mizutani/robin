@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"time"
 
 	"github.com/m-mizutani/goerr/v2"
@@ -22,19 +23,78 @@ type SlackEventConfig struct {
 	EventClaimTTL time.Duration
 }
 
+// MentionRequest is one mention whose sender passed the Slack checks.
+type MentionRequest struct {
+	Key        model.UserKey
+	Slack      interfaces.SlackUserClient // the sender's own Slack client
+	ChannelID  string
+	ThreadTS   string // thread to answer in
+	MentionTS  string
+	InThread   bool // the mention was posted inside an existing thread
+	Text       string
+	ProgressTS string // progress message posted by SlackEventUseCase
+}
+
+// MentionAgent answers a mention in its thread. The agents live under
+// pkg/usecase/agents and are wired in pkg/cli.
+type MentionAgent interface {
+	// OwnedByOther reports whether another user owns the conversation of the
+	// thread.
+	OwnedByOther(ctx context.Context, key model.UserKey, channelID, threadTS string) (bool, error)
+	// Run answers the mention. It posts the reply and the final progress
+	// itself, except that it returns ErrThreadOwnedByOther without touching
+	// Slack when another user took the thread in the meantime. It returns an
+	// error only for a failure that also has to be recorded.
+	Run(ctx context.Context, req MentionRequest) error
+}
+
 type SlackEventUseCase struct {
 	repo   interfaces.Repository
 	bot    interfaces.SlackBot
 	access *SlackUserAccess
-	agent  *Agent
+	agent  MentionAgent
 	cfg    SlackEventConfig
 	now    func() time.Time
 }
 
 func NewSlackEventUseCase(repo interfaces.Repository, bot interfaces.SlackBot, access *SlackUserAccess,
-	agent *Agent, cfg SlackEventConfig) *SlackEventUseCase {
+	agent MentionAgent, cfg SlackEventConfig) *SlackEventUseCase {
 	return &SlackEventUseCase{repo: repo, bot: bot, access: access, agent: agent, cfg: cfg, now: time.Now}
 }
+
+// startPhrases are the first text of a progress message, one chosen at random
+// per mention.
+var startPhrases = []string{
+	"Thinking...",
+	"Pondering...",
+	"Mulling it over...",
+	"Looking into it...",
+	"Getting my bearings...",
+	"Reading the thread...",
+	"Working on it...",
+	"Gathering context...",
+	"Connecting the dots...",
+	"On it...",
+	"Taking a look...",
+	"Sorting things out...",
+	"Collecting my thoughts...",
+	"Considering the request...",
+	"Digging in...",
+	"Piecing it together...",
+}
+
+func progressStart() string {
+	return ":thought_balloon: " + startPhrases[rand.IntN(len(startPhrases))]
+}
+
+// Texts of the progress message and the replies before the agent takes over.
+const (
+	progressSignIn      = ":lock: Sign in to Robin to use me"
+	progressStartFailed = ":warning: Couldn't start this request. Please mention me again."
+	progressNotOwner    = ":no_entry_sign: Only the person who started this conversation can continue it"
+	notOwnerText        = "In this thread, I only answer the person who started the conversation with me. " +
+		"Mention me in a new thread to start your own."
+)
 
 // deleteMessageCallbackID is the callback ID of the "Delete Robin message"
 // message shortcut in the app manifest.
@@ -146,7 +206,7 @@ func (uc *SlackEventUseCase) handleAppMention(ctx context.Context, teamID model.
 				append(vals, goerr.V("auth_test_team_id", identity.TeamID), goerr.V("auth_test_user_id", identity.UserID))...))
 	}
 
-	return uc.agent.Run(ctx, AgentRequest{
+	err = uc.agent.Run(ctx, MentionRequest{
 		Key:        key,
 		Slack:      client,
 		ChannelID:  mention.Channel,
@@ -156,6 +216,16 @@ func (uc *SlackEventUseCase) handleAppMention(ctx context.Context, teamID model.
 		Text:       mention.Text,
 		ProgressTS: progressTS,
 	})
+	if errors.Is(err, ErrThreadOwnedByOther) {
+		// Two users mentioned Robin first in the same thread at once, and the
+		// other one started the conversation.
+		setProgress(progressNotOwner)
+		if err := uc.bot.PostEphemeral(ctx, mention.Channel, key.UserID, threadTS, notOwnerText); err != nil {
+			return goerr.Wrap(err, "failed to tell the user that another user owns the thread", vals...)
+		}
+		return nil
+	}
+	return err
 }
 
 // HandleMessageShortcut runs the "Delete Robin message" shortcut. Shortcuts

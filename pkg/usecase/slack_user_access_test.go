@@ -4,9 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"os"
-	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -76,10 +74,6 @@ type fakeUserClientFactory struct {
 	errs       map[model.SlackUserToken]error
 	tokens     []model.SlackUserToken
 	authTests  int
-	hits       []model.SlackMessageHit
-	searches   []slackSearch
-	// searchWait makes a search block until its context ends.
-	searchWait bool
 }
 
 func newFakeUserClientFactory() *fakeUserClientFactory {
@@ -121,190 +115,10 @@ func (c *fakeUserClient) AuthTest(_ context.Context) (*model.SlackIdentity, erro
 	return id, nil
 }
 
-func (c *fakeUserClient) SearchMessages(ctx context.Context, query string, count int) ([]model.SlackMessageHit, error) {
-	c.factory.mu.Lock()
-	wait := c.factory.searchWait
-	c.factory.mu.Unlock()
-	if wait {
-		<-ctx.Done()
-	}
-	c.factory.mu.Lock()
-	defer c.factory.mu.Unlock()
-	c.factory.searches = append(c.factory.searches, slackSearch{Token: c.token, Query: query, Count: count})
-	if wait {
-		return nil, ctx.Err()
-	}
-	if err, ok := c.factory.errs[c.token]; ok {
-		return nil, err
-	}
-	return c.factory.hits, nil
-}
-
-type slackSearch struct {
-	Token model.SlackUserToken
-	Query string
-	Count int
-}
-
-// botCall is one Slack call the bot token would make. Method is the
-// SlackBot method name.
-type botCall struct {
-	Method    string
-	ChannelID string
-	UserID    model.SlackUserID // the receiver of an ephemeral message
-	Requester model.SlackUserID
-	ThreadTS  string
-	TS        string
-	Text      string
-}
-
-// botMessage is the part of a call the older tests compare.
-type botMessage struct {
-	ChannelID string
-	UserID    model.SlackUserID
-	ThreadTS  string
-	Text      string
-}
-
-// fakeBot records every Slack call the bot token would make, in order.
-type fakeBot struct {
-	mu           sync.Mutex
-	names        map[model.SlackUserID]string
-	nameErr      error
-	ephemeralErr error
-	postErr      error // PostProgress
-	updateErr    error // UpdateProgress
-	answerErr    error // PostAnswer
-	threadErr    error // GetThreadMessages
-	getErr       error // GetMessage
-	deleteErr    error // DeleteMessage
-	thread       []model.SlackThreadMessage
-	message      *model.SlackPostedMessage
-	nextTS       int
-	calls        []botCall
-}
-
-func newFakeBot() *fakeBot {
-	return &fakeBot{names: make(map[model.SlackUserID]string)}
-}
-
-func (b *fakeBot) record(c botCall) {
-	b.calls = append(b.calls, c)
-}
-
-func (b *fakeBot) PostEphemeral(_ context.Context, channelID string, userID model.SlackUserID, threadTS, text string) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.record(botCall{Method: "PostEphemeral", ChannelID: channelID, UserID: userID, ThreadTS: threadTS, Text: text})
-	return b.ephemeralErr
-}
-
-func (b *fakeBot) GetUserName(_ context.Context, userID model.SlackUserID) (string, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.nameErr != nil {
-		return "", b.nameErr
-	}
-	return b.names[userID], nil
-}
-
-func (b *fakeBot) PostProgress(_ context.Context, channelID, threadTS string, requester model.SlackUserID, text string) (string, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.nextTS++
-	ts := fmt.Sprintf("1800000000.%06d", b.nextTS)
-	b.record(botCall{Method: "PostProgress", ChannelID: channelID, ThreadTS: threadTS, Requester: requester, TS: ts, Text: text})
-	if b.postErr != nil {
-		return "", b.postErr
-	}
-	return ts, nil
-}
-
-func (b *fakeBot) UpdateProgress(_ context.Context, channelID, messageTS string, requester model.SlackUserID, text string) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.record(botCall{Method: "UpdateProgress", ChannelID: channelID, TS: messageTS, Requester: requester, Text: text})
-	return b.updateErr
-}
-
-func (b *fakeBot) PostAnswer(_ context.Context, channelID, threadTS string, requester model.SlackUserID, markdown string) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.record(botCall{Method: "PostAnswer", ChannelID: channelID, ThreadTS: threadTS, Requester: requester, Text: markdown})
-	return b.answerErr
-}
-
-func (b *fakeBot) GetThreadMessages(_ context.Context, channelID, threadTS, afterTS, beforeTS string, limit int) ([]model.SlackThreadMessage, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.record(botCall{Method: "GetThreadMessages", ChannelID: channelID, ThreadTS: threadTS,
-		Text: fmt.Sprintf("after=%s before=%s limit=%d", afterTS, beforeTS, limit)})
-	if b.threadErr != nil {
-		return nil, b.threadErr
-	}
-	return append([]model.SlackThreadMessage(nil), b.thread...), nil
-}
-
-func (b *fakeBot) GetMessage(_ context.Context, channelID, ts string) (*model.SlackPostedMessage, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.record(botCall{Method: "GetMessage", ChannelID: channelID, TS: ts})
-	if b.getErr != nil {
-		return nil, b.getErr
-	}
-	msg := *b.message
-	return &msg, nil
-}
-
-func (b *fakeBot) DeleteMessage(_ context.Context, channelID, ts string) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.record(botCall{Method: "DeleteMessage", ChannelID: channelID, TS: ts})
-	return b.deleteErr
-}
-
-func (b *fakeBot) recorded(methods ...string) []botCall {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	var out []botCall
-	for _, c := range b.calls {
-		if len(methods) == 0 || slices.Contains(methods, c.Method) {
-			out = append(out, c)
-		}
-	}
-	return out
-}
-
-func (b *fakeBot) methods() []string {
-	var out []string
-	for _, c := range b.recorded() {
-		out = append(out, c.Method)
-	}
-	return out
-}
-
-func (b *fakeBot) texts(method string) []string {
-	var out []string
-	for _, c := range b.recorded(method) {
-		out = append(out, c.Text)
-	}
-	return out
-}
-
-func (b *fakeBot) answers() []botMessage {
-	var out []botMessage
-	for _, c := range b.recorded("PostAnswer") {
-		out = append(out, botMessage{ChannelID: c.ChannelID, ThreadTS: c.ThreadTS, Text: c.Text})
-	}
-	return out
-}
-
-func (b *fakeBot) ephemeralMessages() []botMessage {
-	var out []botMessage
-	for _, c := range b.recorded("PostEphemeral") {
-		out = append(out, botMessage{ChannelID: c.ChannelID, UserID: c.UserID, ThreadTS: c.ThreadTS, Text: c.Text})
-	}
-	return out
+// SearchMessages is not used by the tests of this package; the agents test
+// the search with their own client.
+func (c *fakeUserClient) SearchMessages(context.Context, string, int) ([]model.SlackMessageHit, error) {
+	return nil, errors.New("search is not used in usecase tests")
 }
 
 var testKey = model.UserKey{TeamID: "T0123ABCD", UserID: "U0123ABCD"}

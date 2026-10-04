@@ -1,4 +1,4 @@
-package usecase
+package mention
 
 import (
 	_ "embed"
@@ -14,13 +14,13 @@ import (
 	"github.com/m-mizutani/robin/pkg/domain/model"
 )
 
-//go:embed prompt/agent_system.md
-var agentSystemPromptTemplate string
+//go:embed prompt/system.md
+var systemPromptTemplate string
 
 // renderSystemPrompt fills in values decided by the server configuration
 // only, so the prompt is the same for every user and run.
 func renderSystemPrompt(services []string, settingsURL string) (string, error) {
-	tmpl, err := template.New("agent_system").Parse(agentSystemPromptTemplate)
+	tmpl, err := template.New("system").Parse(systemPromptTemplate)
 	if err != nil {
 		return "", goerr.Wrap(err, "failed to parse agent system prompt")
 	}

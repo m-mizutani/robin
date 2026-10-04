@@ -123,8 +123,6 @@ type fakeGitHubUsers struct {
 	identity *model.GitHubIdentity
 	err      error
 	tokens   []model.GitHubAccessToken
-	readErr  error
-	reads    []githubRead
 }
 
 func (f *fakeGitHubUsers) New(token model.GitHubAccessToken) interfaces.GitHubUserClient {
@@ -136,46 +134,24 @@ type fakeGitHubUserClient struct {
 	token model.GitHubAccessToken
 }
 
-// githubRead is one read call the fake client received.
-type githubRead struct {
-	Token  model.GitHubAccessToken
-	Method string
-	Args   []any
+// The read methods are not used by the tests of this package; the agents
+// test the reads with their own clients.
+var errGitHubReadNotUsed = errors.New("github reads are not used in usecase tests")
+
+func (c *fakeGitHubUserClient) SearchIssues(context.Context, string, int) ([]model.GitHubIssueSummary, error) {
+	return nil, errGitHubReadNotUsed
 }
 
-func (c *fakeGitHubUserClient) read(method string, args ...any) error {
-	c.users.mu.Lock()
-	defer c.users.mu.Unlock()
-	c.users.reads = append(c.users.reads, githubRead{Token: c.token, Method: method, Args: args})
-	return c.users.readErr
+func (c *fakeGitHubUserClient) SearchCode(context.Context, string, int) ([]model.GitHubCodeHit, error) {
+	return nil, errGitHubReadNotUsed
 }
 
-func (c *fakeGitHubUserClient) SearchIssues(_ context.Context, query string, perPage int) ([]model.GitHubIssueSummary, error) {
-	if err := c.read("SearchIssues", query, perPage); err != nil {
-		return nil, err
-	}
-	return []model.GitHubIssueSummary{{Repository: "o/r", Number: 1, Title: "Issue"}}, nil
+func (c *fakeGitHubUserClient) GetIssue(context.Context, string, string, int) (*model.GitHubIssue, error) {
+	return nil, errGitHubReadNotUsed
 }
 
-func (c *fakeGitHubUserClient) SearchCode(_ context.Context, query string, perPage int) ([]model.GitHubCodeHit, error) {
-	if err := c.read("SearchCode", query, perPage); err != nil {
-		return nil, err
-	}
-	return []model.GitHubCodeHit{{Repository: "o/r", Path: "a.go"}}, nil
-}
-
-func (c *fakeGitHubUserClient) GetIssue(_ context.Context, owner, repo string, number int) (*model.GitHubIssue, error) {
-	if err := c.read("GetIssue", owner, repo, number); err != nil {
-		return nil, err
-	}
-	return &model.GitHubIssue{GitHubIssueSummary: model.GitHubIssueSummary{Repository: owner + "/" + repo, Number: number}}, nil
-}
-
-func (c *fakeGitHubUserClient) GetContent(_ context.Context, owner, repo, path, ref string) (*model.GitHubContent, error) {
-	if err := c.read("GetContent", owner, repo, path, ref); err != nil {
-		return nil, err
-	}
-	return &model.GitHubContent{Type: "file", Path: path, Text: "content"}, nil
+func (c *fakeGitHubUserClient) GetContent(context.Context, string, string, string, string) (*model.GitHubContent, error) {
+	return nil, errGitHubReadNotUsed
 }
 
 func (c *fakeGitHubUserClient) GetUser(context.Context) (*model.GitHubIdentity, error) {

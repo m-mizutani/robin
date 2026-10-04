@@ -22,6 +22,7 @@ import (
 	httpctrl "github.com/m-mizutani/robin/pkg/controller/http"
 	"github.com/m-mizutani/robin/pkg/domain/interfaces"
 	"github.com/m-mizutani/robin/pkg/usecase"
+	"github.com/m-mizutani/robin/pkg/usecase/agents/mention"
 	"github.com/m-mizutani/robin/pkg/utils/async"
 	"github.com/m-mizutani/robin/pkg/utils/logging"
 	"github.com/m-mizutani/robin/pkg/utils/safe"
@@ -201,7 +202,7 @@ func runServe(ctx context.Context, cfg *serveConfig) error {
 	// The Access components are shared by the settings page and the agent,
 	// so each token has one owner in the process.
 	var httpOpts []httpctrl.Option
-	var services usecase.AgentServices
+	var services mention.Services
 	if cfg.google.Enabled() {
 		googleAccess := usecase.NewGoogleWorkspaceAccess(repo, cipher, googleadapter.NewWorkspaceClientFactory(
 			cfg.google.ClientID(), cfg.google.ClientSecret(), &http.Client{Timeout: googleRequestTimeout}))
@@ -242,7 +243,7 @@ func runServe(ctx context.Context, cfg *serveConfig) error {
 			return err
 		}
 		llm := claude.New(claude.Config{Model: settings.Model, MaxTokens: llmMaxTokens, Effort: llmEffort}, llmOpts...)
-		agent, err := usecase.NewAgent(repo, llm, bot, services, usecase.AgentConfig{
+		agent, err := mention.New(repo, llm, bot, services, mention.Config{
 			BaseURL:          cfg.server.BaseURL(),
 			Rate:             settings.Rate,
 			Budget:           settings.Budget,

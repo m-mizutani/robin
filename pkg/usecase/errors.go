@@ -86,7 +86,7 @@ var (
 	// refresh token; the user has to disconnect and connect again.
 	ErrGoogleWorkspaceReconnectRequired = errors.New("google workspace needs to be reconnected")
 
-	// ErrAgentSessionLeaseLost means another run took the session's lease
-	// before this run committed.
-	ErrAgentSessionLeaseLost = errors.New("agent session lease was lost")
+	// ErrThreadOwnedByOther means another user owns the conversation of the
+	// thread a mention was posted in.
+	ErrThreadOwnedByOther = errors.New("thread is owned by another user")
 )
