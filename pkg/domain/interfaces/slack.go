@@ -35,6 +35,9 @@ type SlackBot interface {
 	// DeleteMessage deletes a message Robin posted. It fails with
 	// ErrSlackMessageNotFound when the message no longer exists.
 	DeleteMessage(ctx context.Context, channelID, ts string) error
+	// PostMessage posts markdown to the channel itself, not in a thread,
+	// split as PostAnswer splits it, and returns the ts of the first message.
+	PostMessage(ctx context.Context, channelID string, requester model.SlackUserID, markdown string) (string, error)
 }
 
 // SlackUserClientFactory builds a client authenticated with one user's token.

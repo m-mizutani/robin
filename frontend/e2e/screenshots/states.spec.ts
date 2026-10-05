@@ -34,9 +34,11 @@ test.beforeEach(async ({ page }) => {
       await route.fulfill({ status: 200, contentType: 'text/html', body })
     }
   })
-  // Notion and GitHub are not connected unless a test mocks their status.
+  // Notion and GitHub are not connected, and there are no scheduled
+  // messages, unless a test mocks them.
   await mockNotion(page, 200, notionNotConnected)
   await mockGitHub(page, 200, githubNotConnected)
+  await mockJobs(page, 200, jobsStatus(null))
 })
 
 // Resolved against the working directory, which is frontend/ for `pnpm screenshots`.
@@ -106,6 +108,22 @@ const githubConnected = { available: true, connected: true, login: 'octocat' }
 
 async function mockGitHub(page: Page, status: number, body: object) {
   await page.route('**/api/v1/integrations/github', (route) =>
+    route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) }),
+  )
+}
+
+function trigger(n: number, hour: number, minute = 0) {
+  return { id: `00000000-0000-4000-8000-00000000000${n}`, job: 'hello', hour, minute }
+}
+
+const savedSetting = { channel_id: 'C0123ABCD', time_zone: 'Asia/Tokyo' }
+
+function jobsStatus(setting: object | null, triggers: object[] = []) {
+  return { setting, triggers }
+}
+
+async function mockJobs(page: Page, status: number, body: object) {
+  await page.route('**/api/v1/jobs', (route) =>
     route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) }),
   )
 }
@@ -476,3 +494,125 @@ for (const [result, name, text] of [
     await page.screenshot(shot(name))
   })
 }
+
+const scheduled = (page: Page) => page.getByRole('region', { name: 'Scheduled messages' })
+
+// The form starts with the browser's time zone; fix it so every screenshot
+// shows the same one.
+test.describe('scheduled messages', () => {
+  test.use({ timezoneId: 'Asia/Tokyo' })
+
+  test.beforeEach(async ({ page }) => {
+    await mockMe(page, 200, me(true))
+    await mockGoogle(page, 200, googleNotConnected)
+  })
+
+  const greeting = (page: Page) => page.getByRole('region', { name: 'Morning greeting' })
+  const withTimes = jobsStatus(savedSetting, [trigger(1, 9), trigger(2, 18, 30)])
+
+  test('settings: scheduled messages loading', async ({ page }) => {
+    await page.route('**/api/v1/jobs', () => new Promise(() => {}))
+    await page.goto('/settings')
+    await expect(scheduled(page).getByText('Loading scheduled messages…')).toBeVisible()
+    await page.screenshot(shot('settings-jobs-loading'))
+  })
+
+  test('settings: scheduled messages could not be loaded', async ({ page }) => {
+    await mockJobs(page, 500, { error: 'internal_error' })
+    await page.goto('/settings')
+    await expect(scheduled(page).getByRole('button', { name: 'Load again' })).toBeVisible()
+    await page.screenshot(shot('settings-jobs-load-failed'))
+  })
+
+  test('settings: scheduled messages without a setting', async ({ page }) => {
+    await page.goto('/settings')
+    await expect(greeting(page).getByText('Save the channel and time zone first.')).toBeVisible()
+    await page.screenshot(shot('settings-jobs-no-setting'))
+  })
+
+  test('settings: scheduled messages without times', async ({ page }) => {
+    await mockJobs(page, 200, jobsStatus(savedSetting))
+    await page.goto('/settings')
+    await expect(greeting(page).getByText('No times yet.')).toBeVisible()
+    await page.screenshot(shot('settings-jobs-no-times'))
+  })
+
+  test('settings: scheduled messages with times', async ({ page }) => {
+    await mockJobs(page, 200, withTimes)
+    await page.goto('/settings')
+    await expect(greeting(page).getByRole('listitem', { name: '18:30' })).toBeVisible()
+    await page.screenshot(shot('settings-jobs-times'))
+  })
+
+  test('settings: saving the job setting', async ({ page }) => {
+    await page.route('**/api/v1/jobs/setting', () => new Promise(() => {}))
+    await page.goto('/settings')
+    await page.getByLabel('Channel ID').fill('C0123ABCD')
+    await page.getByRole('button', { name: 'Save', exact: true }).click()
+    await expect(scheduled(page).getByRole('button', { name: 'Saving…' })).toBeDisabled()
+    await page.screenshot(shot('settings-jobs-saving'))
+  })
+
+  for (const [name, status, body, text] of [
+    ['settings-jobs-saved', 200, savedSetting, 'Saved.'],
+    ['settings-jobs-save-invalid', 400, { error: 'invalid_input' }, 'Check the channel ID and time zone.'],
+    ['settings-jobs-save-failed', 500, { error: 'internal_error' }, 'Could not save. Try again.'],
+  ] as const) {
+    test(`settings: job setting save result ${name}`, async ({ page }) => {
+      await page.route('**/api/v1/jobs/setting', (route) =>
+        route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) }),
+      )
+      await page.goto('/settings')
+      await page.getByLabel('Channel ID').fill('C0123ABCD')
+      await page.getByRole('button', { name: 'Save', exact: true }).click()
+      await expect(scheduled(page).getByText(text)).toBeVisible()
+      await page.screenshot(shot(name))
+    })
+  }
+
+  test('settings: adding a time', async ({ page }) => {
+    await mockJobs(page, 200, jobsStatus(savedSetting))
+    await page.route('**/api/v1/jobs/triggers', () => new Promise(() => {}))
+    await page.goto('/settings')
+    await greeting(page).getByRole('button', { name: 'Add', exact: true }).click()
+    await expect(greeting(page).getByRole('button', { name: 'Adding…' })).toBeDisabled()
+    await page.screenshot(shot('settings-jobs-adding'))
+  })
+
+  for (const [name, status, code, text] of [
+    ['settings-jobs-add-invalid', 400, 'invalid_input', 'Check the time.'],
+    ['settings-jobs-add-no-setting', 409, 'setting_required', 'Save the channel and time zone first.'],
+    ['settings-jobs-add-failed', 500, 'internal_error', 'Could not add the time. Try again.'],
+  ] as const) {
+    test(`settings: adding a time rejected ${name}`, async ({ page }) => {
+      await mockJobs(page, 200, jobsStatus(savedSetting))
+      await page.route('**/api/v1/jobs/triggers', (route) =>
+        route.fulfill({ status, contentType: 'application/json', body: JSON.stringify({ error: code }) }),
+      )
+      await page.goto('/settings')
+      await greeting(page).getByRole('button', { name: 'Add', exact: true }).click()
+      await expect(greeting(page).getByRole('alert')).toHaveText(text)
+      await page.screenshot(shot(name))
+    })
+  }
+
+  test('settings: deleting a time', async ({ page }) => {
+    await mockJobs(page, 200, withTimes)
+    await page.route('**/api/v1/jobs/triggers/*', () => new Promise(() => {}))
+    await page.goto('/settings')
+    await page.getByRole('button', { name: 'Delete 09:00' }).click()
+    await expect(page.getByRole('button', { name: 'Delete 09:00' })).toHaveText('Deleting…')
+    await page.screenshot(shot('settings-jobs-deleting'))
+  })
+
+  test('settings: deleting a time failed', async ({ page }) => {
+    await mockJobs(page, 200, withTimes)
+    await page.route('**/api/v1/jobs/triggers/*', (route) =>
+      route.fulfill({ status: 500, contentType: 'application/json', body: '{"error":"internal_error"}' }),
+    )
+    await page.goto('/settings')
+    await page.getByRole('button', { name: 'Delete 09:00' }).click()
+    await expect(greeting(page).getByRole('alert')).toHaveText('Could not delete the time. Try again.')
+    await page.screenshot(shot('settings-jobs-delete-failed'))
+  })
+})

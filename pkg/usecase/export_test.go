@@ -26,6 +26,13 @@ var (
 
 var StartPhrasesForTest = startPhrases
 
+func (uc *JobSettingUseCase) SetClockForTest(now func() time.Time, newID func() string) {
+	uc.now = now
+	uc.newID = newID
+}
+
+func (s *Scheduler) SetNowForTest(now func() time.Time) { s.now = now }
+
 // SetClockForTest replaces the clock, the wait between polls, and the ID
 // generator of GitHubUserAccess.
 func (a *GitHubUserAccess) SetClockForTest(now func() time.Time, sleep func(ctx context.Context, d time.Duration) error, newID func() string) {

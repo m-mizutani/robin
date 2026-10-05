@@ -12,7 +12,6 @@ import (
 	"github.com/m-mizutani/goerr/v2"
 	"github.com/urfave/cli/v3"
 
-	"github.com/m-mizutani/robin/pkg/adapter/claude"
 	githubadapter "github.com/m-mizutani/robin/pkg/adapter/github"
 	googleadapter "github.com/m-mizutani/robin/pkg/adapter/google"
 	"github.com/m-mizutani/robin/pkg/adapter/localcipher"
@@ -67,7 +66,8 @@ type serveConfig struct {
 	file       config.File
 	server     config.Server
 	repository config.Repository
-	slack      config.Slack
+	slackApp   config.SlackApp
+	slackBot   config.SlackBot
 	llm        config.LLM
 	kms        config.KMS
 	google     config.Google
@@ -81,7 +81,8 @@ func (c *serveConfig) flags() []cli.Flag {
 	flags = append(flags, c.file.Flags()...)
 	flags = append(flags, c.server.Flags()...)
 	flags = append(flags, c.repository.Flags()...)
-	flags = append(flags, c.slack.Flags()...)
+	flags = append(flags, c.slackApp.Flags()...)
+	flags = append(flags, c.slackBot.Flags()...)
 	flags = append(flags, c.llm.Flags()...)
 	flags = append(flags, c.kms.Flags()...)
 	flags = append(flags, c.google.Flags()...)
@@ -104,12 +105,20 @@ func (c *serveConfig) validate() error {
 		return err
 	}
 	// The agent answers Slack mentions, so the LLM is needed only with events.
-	return c.llm.Validate(c.slack.EventsEnabled())
+	return c.llm.Validate(c.eventsEnabled())
+}
+
+// eventsEnabled reports whether Slack events can be received and answered.
+func (c *serveConfig) eventsEnabled() bool {
+	return c.slackBot.Enabled() && c.slackApp.SigningSecret() != ""
 }
 
 func (c *serveConfig) validateAuth() error {
 	if !c.noAuth.Enabled() {
-		if err := c.slack.Validate(); err != nil {
+		if err := c.slackApp.Validate(); err != nil {
+			return err
+		}
+		if err := c.slackBot.Validate(true); err != nil {
 			return err
 		}
 		return c.kms.Validate()
@@ -121,8 +130,13 @@ func (c *serveConfig) validateAuth() error {
 	if !c.repository.IsMemory() {
 		return goerr.New("--no-auth requires --repository-backend memory")
 	}
-	if err := c.slack.ValidateForNoAuth(); err != nil {
+	if err := c.slackApp.ValidateForNoAuth(); err != nil {
 		return err
+	}
+	// The bot token and the signing secret receive Slack events, so they are
+	// set together or not at all.
+	if c.slackBot.Enabled() != (c.slackApp.SigningSecret() != "") {
+		return goerr.New("--slack-bot-token and --slack-signing-secret must be set together")
 	}
 	if c.kms.IsSet() {
 		return c.kms.Validate()
@@ -177,23 +191,20 @@ func runServe(ctx context.Context, cfg *serveConfig) error {
 		logging.Default().Warn("KMS is not configured: tokens are encrypted with a key that is lost when the server stops")
 	}
 
-	var bot interfaces.SlackBot
-	if cfg.slack.BotToken() != "" {
-		bot = slackadapter.NewBot(cfg.slack.BotToken())
-	}
-	oauth := slackadapter.NewOAuth(cfg.slack.ClientID(), cfg.slack.ClientSecret())
+	bot := cfg.slackBot.Configure()
+	oauth := slackadapter.NewOAuth(cfg.slackApp.ClientID(), cfg.slackApp.ClientSecret())
 	userClients := slackadapter.NewUserClientFactory()
 
 	authCfg := usecase.AuthConfig{
-		ClientID:   cfg.slack.ClientID(),
+		ClientID:   cfg.slackApp.ClientID(),
 		BaseURL:    cfg.server.BaseURL(),
-		TeamID:     cfg.slack.TeamID(),
+		TeamID:     cfg.slackApp.TeamID(),
 		SessionTTL: cfg.server.SessionTTL(),
 	}
 	if cfg.noAuth.Enabled() {
 		authCfg.NoAuthUserID = cfg.noAuth.UserID()
 		logging.Default().Warn("authentication is disabled: every web sign-in becomes this user",
-			"team_id", cfg.slack.TeamID(), "user_id", cfg.noAuth.UserID())
+			"team_id", cfg.slackApp.TeamID(), "user_id", cfg.noAuth.UserID())
 	}
 
 	access := usecase.NewSlackUserAccess(repo, cipher, userClients)
@@ -237,12 +248,12 @@ func runServe(ctx context.Context, cfg *serveConfig) error {
 		services.GitHub = githubAccess
 		httpOpts = append(httpOpts, httpctrl.WithGitHub(githubUC))
 	}
-	if cfg.slack.EventsEnabled() {
-		llmOpts, err := cfg.llm.Configure(ctx)
+	httpOpts = append(httpOpts, httpctrl.WithJobs(usecase.NewJobSettingUseCase(repo)))
+	if cfg.eventsEnabled() {
+		llm, err := cfg.llm.NewClient(ctx, settings.Model, llmMaxTokens, llmEffort)
 		if err != nil {
 			return err
 		}
-		llm := claude.New(claude.Config{Model: settings.Model, MaxTokens: llmMaxTokens, Effort: llmEffort}, llmOpts...)
 		agent, err := mention.New(repo, llm, bot, services, mention.Config{
 			BaseURL:          cfg.server.BaseURL(),
 			Rate:             settings.Rate,
@@ -262,11 +273,11 @@ func runServe(ctx context.Context, cfg *serveConfig) error {
 			return goerr.Wrap(err, "failed to build the agent")
 		}
 		slackUC := usecase.NewSlackEventUseCase(repo, bot, access, agent, usecase.SlackEventConfig{
-			TeamID:        cfg.slack.TeamID(),
+			TeamID:        cfg.slackApp.TeamID(),
 			BaseURL:       cfg.server.BaseURL(),
 			EventClaimTTL: slackEventClaimTTL,
 		})
-		httpOpts = append(httpOpts, httpctrl.WithSlackEvents(slackUC, cfg.slack.SigningSecret()))
+		httpOpts = append(httpOpts, httpctrl.WithSlackEvents(slackUC, cfg.slackApp.SigningSecret()))
 		logging.Default().Info("slack agent enabled",
 			"provider", settings.Provider, "model", settings.Model, "vertex", cfg.llm.UsesVertex(),
 			"budget_usd", settings.Budget.USD(), "session_ttl", settings.SessionTTL.String())

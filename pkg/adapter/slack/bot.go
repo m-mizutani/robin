@@ -115,18 +115,36 @@ func (b *Bot) UpdateProgress(ctx context.Context, channelID, messageTS string, r
 }
 
 func (b *Bot) PostAnswer(ctx context.Context, channelID, threadTS string, requester model.SlackUserID, markdown string) error {
+	_, err := b.postAnswer(ctx, channelID, threadTS, requester, markdown)
+	return err
+}
+
+func (b *Bot) PostMessage(ctx context.Context, channelID string, requester model.SlackUserID, markdown string) (string, error) {
+	return b.postAnswer(ctx, channelID, "", requester, markdown)
+}
+
+// postAnswer posts markdown in parts and returns the ts of the first part. An
+// empty threadTS posts to the channel itself.
+func (b *Bot) postAnswer(ctx context.Context, channelID, threadTS string, requester model.SlackUserID, markdown string) (string, error) {
+	first := ""
 	for i, chunk := range splitAnswer(markdown, answerChunkChars) {
-		_, _, err := b.client.PostMessageContext(ctx, channelID,
+		opts := []slack.MsgOption{
 			slack.MsgOptionText(truncateRunes(chunk, notificationChars), false),
 			slack.MsgOptionBlocks(slack.NewMarkdownBlock(answerBlockPrefix+string(requester), chunk)),
-			slack.MsgOptionTS(threadTS),
-		)
+		}
+		if threadTS != "" {
+			opts = append(opts, slack.MsgOptionTS(threadTS))
+		}
+		_, ts, err := b.client.PostMessageContext(ctx, channelID, opts...)
 		if err != nil {
-			return wrapError(err, "failed to post answer",
+			return first, wrapError(err, "failed to post answer",
 				goerr.V("channel_id", channelID), goerr.V("thread_ts", threadTS), goerr.V("part", i))
 		}
+		if first == "" {
+			first = ts
+		}
 	}
-	return nil
+	return first, nil
 }
 
 // splitAnswer splits text into parts of at most limit characters, at line

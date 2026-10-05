@@ -7,7 +7,11 @@ GraphQL.
 
 ## Layers
 
-- `pkg/cli/` — flags, environment variables, dependency wiring, the `serve` command.
+- `pkg/cli/` — flags, environment variables, dependency wiring, the `serve`
+  and `schedule` commands. Each flag is defined once in a flag group of
+  `pkg/cli/config` (`SlackApp`, `SlackBot`, `LLM`, `Scheduler`, ...), and a
+  command takes the groups it needs; clients built from flags (the bot, the
+  Claude client) come from methods of those groups.
 - `pkg/controller/http/` — routing, cookies, Slack signature verification, JSON
   responses, SPA serving. Parses input and calls a usecase; no business logic,
   no repository or external API calls.
@@ -19,10 +23,18 @@ GraphQL.
   `GitHubUserAccess` is the only one for GitHub user and refresh tokens (it
   refreshes them before they expire, one instance at a time through a lease).
 - `pkg/usecase/agents/{name}/` — one package per LLM agent (`mention` answers
-  Slack mentions). An agent imports `pkg/usecase` and reads the integrations
-  through narrow interfaces it defines, which the Access components satisfy;
-  `pkg/usecase` never imports an agent and calls it through an interface it
-  defines (`MentionAgent`). `pkg/cli` wires them.
+  Slack mentions, `hello` posts the scheduled greeting). An agent imports
+  `pkg/usecase` and reads the integrations through narrow interfaces it
+  defines, which the Access components satisfy; `pkg/usecase` never imports an
+  agent and calls it through an interface it defines (`MentionAgent`,
+  `Job`). `pkg/cli` wires them.
+- Scheduled jobs: a job (`model.JobName`) is a unit of work defined in code,
+  not stored. `usecase.Scheduler.RunDue` finds the due job triggers, claims
+  and runs them. What starts it (the `schedule` command now, possibly an HTTP
+  handler later) only calls `RunDue` and reports its result; it makes no claim
+  or run decision. Each job has one `usecase.Job`, built by `newJobs` in
+  `pkg/cli/job.go`; a job need not be an agent, and it decides how late it may
+  still run (`MaxDelay`).
 - `pkg/usecase/usecasetest/` — test doubles of domain interfaces (Slack bot,
   LLM) shared by the tests of `pkg/usecase` and the agents. Imported only by
   tests.
@@ -57,6 +69,11 @@ Slack Events API handlers acknowledge within three seconds and run the rest in
   `agentThreads/{AgentSessionID}` records the only user whose agent
   conversation a Slack thread holds; it is written in the same transaction as
   that user's agent session and only `OwnedByOther` and `Begin` read it.
+  `schedules/{JobTriggerID}` holds the owner, the trigger ID and the next run
+  time of each job trigger; it is written and deleted in the same transaction
+  as the user's job setting (`settings/job`, which holds the triggers), and
+  only `JobSettingRepository.ListDue`, used by the scheduler, returns entries
+  of more than one user.
 - The user key of a request comes only from a verified Slack event or a verified
   web session. A user's token is used only for that same user's requests.
 - The KMS additional authenticated data of a token is

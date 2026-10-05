@@ -20,7 +20,26 @@ type Repository interface {
 	Session() SessionRepository
 	SlackEvent() SlackEventRepository
 	AgentSession() AgentSessionRepository
+	JobSetting() JobSettingRepository
 	Close() error
+}
+
+// JobSettingRepository keeps each user's job setting, with its triggers,
+// under that user, and one schedule entry per trigger outside the user's
+// document so the scheduler can find due triggers. The entries are written in
+// the same transaction as the setting.
+type JobSettingRepository interface {
+	// Get fails with ErrNotFound when key has no setting.
+	Get(ctx context.Context, key model.UserKey) (*model.JobSetting, error)
+	// Update runs fn in a transaction with a copy of the stored setting (nil
+	// when key has none) and stores what fn returns, creating, updating and
+	// deleting the schedule entries to match its triggers. fn returning nil
+	// stores nothing. fn may run more than once and must have no side effects
+	// other than recording its last result.
+	Update(ctx context.Context, key model.UserKey, fn func(current *model.JobSetting) (*model.JobSetting, error)) error
+	// ListDue returns the schedule entries of every user whose NextRunAt is
+	// at or before now, oldest first. Only the scheduler calls it.
+	ListDue(ctx context.Context, now time.Time) ([]*model.JobScheduleEntry, error)
 }
 
 // AgentSessionRepository keeps the conversation of one Slack thread under the

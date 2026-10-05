@@ -53,6 +53,13 @@ type gitHubUseCase interface {
 	Disconnect(ctx context.Context, key model.UserKey) error
 }
 
+type jobUseCase interface {
+	Get(ctx context.Context, key model.UserKey) (*model.JobSetting, error)
+	Save(ctx context.Context, key model.UserKey, channelID, timeZone string) (*model.JobSetting, error)
+	AddTrigger(ctx context.Context, key model.UserKey, job model.JobName, at model.DailyTime) (*model.JobTrigger, error)
+	DeleteTrigger(ctx context.Context, key model.UserKey, id model.JobTriggerID) error
+}
+
 type Config struct {
 	// BaseURL decides the Secure cookie attribute. A TLS-terminating proxy
 	// hides TLS from the request, so the scheme of the public URL is used.
@@ -68,6 +75,7 @@ type Server struct {
 	googleUC     googleWorkspaceUseCase
 	notionUC     notionUseCase
 	githubUC     gitHubUseCase
+	jobUC        jobUseCase
 	secureCookie bool
 }
 
@@ -79,6 +87,15 @@ type options struct {
 	googleUC           googleWorkspaceUseCase
 	notionUC           notionUseCase
 	githubUC           gitHubUseCase
+	jobUC              jobUseCase
+}
+
+// WithJobs mounts the job setting endpoints under /api/v1/jobs. serve always
+// passes it; servers built for other tests may leave it out.
+func WithJobs(uc jobUseCase) Option {
+	return func(o *options) {
+		o.jobUC = uc
+	}
 }
 
 // WithNotion mounts the connect, callback, and disconnect endpoints of the
@@ -147,6 +164,7 @@ func New(authUC authUseCase, cfg Config, opts ...Option) (*Server, error) {
 		googleUC:     o.googleUC,
 		notionUC:     o.notionUC,
 		githubUC:     o.githubUC,
+		jobUC:        o.jobUC,
 		secureCookie: base.Scheme == "https",
 	}
 
@@ -191,6 +209,16 @@ func New(authUC authUseCase, cfg Config, opts ...Option) (*Server, error) {
 			r.With(requireSession(authUC)).Post("/disconnect", s.githubDisconnectHandler)
 		}
 		r.NotFound(apiNotFound)
+	})
+	r.Route(jobsPath, func(r chi.Router) {
+		if s.jobUC != nil {
+			r.With(requireSession(authUC)).Get("/", s.jobsGetHandler)
+			r.With(requireSession(authUC)).Put("/setting", s.jobSettingPutHandler)
+			r.With(requireSession(authUC)).Post("/triggers", s.jobTriggerPostHandler)
+			r.With(requireSession(authUC)).Delete("/triggers/{triggerID}", s.jobTriggerDeleteHandler)
+		}
+		r.NotFound(apiNotFound)
+		r.MethodNotAllowed(apiNotFound)
 	})
 	r.HandleFunc("/api/*", apiNotFound)
 

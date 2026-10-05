@@ -4,18 +4,21 @@ import (
 	"github.com/m-mizutani/goerr/v2"
 	"github.com/urfave/cli/v3"
 
+	slackadapter "github.com/m-mizutani/robin/pkg/adapter/slack"
+	"github.com/m-mizutani/robin/pkg/domain/interfaces"
 	"github.com/m-mizutani/robin/pkg/domain/model"
 )
 
-type Slack struct {
+// SlackApp holds the settings of signing in with Slack and receiving its
+// events: the OAuth client, the signing secret and the workspace.
+type SlackApp struct {
 	clientID      string
 	clientSecret  string
 	signingSecret string
-	botToken      string
 	teamID        string
 }
 
-func (x *Slack) Flags() []cli.Flag {
+func (x *SlackApp) Flags() []cli.Flag {
 	return []cli.Flag{
 		&cli.StringFlag{
 			Name:        "slack-client-id",
@@ -39,13 +42,6 @@ func (x *Slack) Flags() []cli.Flag {
 			Destination: &x.signingSecret,
 		},
 		&cli.StringFlag{
-			Name:        "slack-bot-token",
-			Category:    "Slack",
-			Usage:       "Bot user OAuth token (xoxb-...)",
-			Sources:     cli.EnvVars("ROBIN_SLACK_BOT_TOKEN"),
-			Destination: &x.botToken,
-		},
-		&cli.StringFlag{
 			Name:        "slack-team-id",
 			Category:    "Slack",
 			Usage:       "ID of the Slack workspace (T...) this server accepts",
@@ -55,7 +51,9 @@ func (x *Slack) Flags() []cli.Flag {
 	}
 }
 
-func (x *Slack) Validate() error {
+// Validate requires the client ID, the client secret, the signing secret and
+// the team ID.
+func (x *SlackApp) Validate() error {
 	required := []struct {
 		flag  string
 		value string
@@ -63,7 +61,6 @@ func (x *Slack) Validate() error {
 		{"--slack-client-id", x.clientID},
 		{"--slack-client-secret", x.clientSecret},
 		{"--slack-signing-secret", x.signingSecret},
-		{"--slack-bot-token", x.botToken},
 		{"--slack-team-id", x.teamID},
 	}
 	for _, r := range required {
@@ -71,35 +68,63 @@ func (x *Slack) Validate() error {
 			return goerr.New(r.flag + " is required")
 		}
 	}
-	if err := model.SlackTeamID(x.teamID).Validate(); err != nil {
-		return goerr.Wrap(err, "invalid --slack-team-id")
-	}
-	return nil
+	return x.validateTeamID()
 }
 
 // ValidateForNoAuth is the check used with --no-auth: only the workspace is
-// required, since nobody signs in through Slack. The bot token and the signing
-// secret receive Slack events, so they are set together or not at all.
-func (x *Slack) ValidateForNoAuth() error {
+// required, since nobody signs in through Slack.
+func (x *SlackApp) ValidateForNoAuth() error {
 	if x.teamID == "" {
 		return goerr.New("--slack-team-id is required")
 	}
+	return x.validateTeamID()
+}
+
+func (x *SlackApp) validateTeamID() error {
 	if err := model.SlackTeamID(x.teamID).Validate(); err != nil {
 		return goerr.Wrap(err, "invalid --slack-team-id")
-	}
-	if (x.botToken == "") != (x.signingSecret == "") {
-		return goerr.New("--slack-bot-token and --slack-signing-secret must be set together")
 	}
 	return nil
 }
 
-// EventsEnabled reports whether Slack events can be received and answered.
-func (x *Slack) EventsEnabled() bool {
-	return x.botToken != "" && x.signingSecret != ""
+func (x *SlackApp) ClientID() string          { return x.clientID }
+func (x *SlackApp) ClientSecret() string      { return x.clientSecret }
+func (x *SlackApp) SigningSecret() string     { return x.signingSecret }
+func (x *SlackApp) TeamID() model.SlackTeamID { return model.SlackTeamID(x.teamID) }
+
+// SlackBot holds the bot token. Every command that posts as Robin builds its
+// bot here.
+type SlackBot struct {
+	botToken string
 }
 
-func (x *Slack) ClientID() string          { return x.clientID }
-func (x *Slack) ClientSecret() string      { return x.clientSecret }
-func (x *Slack) SigningSecret() string     { return x.signingSecret }
-func (x *Slack) BotToken() string          { return x.botToken }
-func (x *Slack) TeamID() model.SlackTeamID { return model.SlackTeamID(x.teamID) }
+func (x *SlackBot) Flags() []cli.Flag {
+	return []cli.Flag{
+		&cli.StringFlag{
+			Name:        "slack-bot-token",
+			Category:    "Slack",
+			Usage:       "Bot user OAuth token (xoxb-...)",
+			Sources:     cli.EnvVars("ROBIN_SLACK_BOT_TOKEN"),
+			Destination: &x.botToken,
+		},
+	}
+}
+
+// Validate makes the bot token mandatory when required.
+func (x *SlackBot) Validate(required bool) error {
+	if required && x.botToken == "" {
+		return goerr.New("--slack-bot-token is required")
+	}
+	return nil
+}
+
+// Enabled reports whether a bot token is set.
+func (x *SlackBot) Enabled() bool { return x.botToken != "" }
+
+// Configure returns the bot, or nil when no bot token is set.
+func (x *SlackBot) Configure() interfaces.SlackBot {
+	if !x.Enabled() {
+		return nil
+	}
+	return slackadapter.NewBot(x.botToken)
+}

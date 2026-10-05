@@ -346,3 +346,32 @@ func TestBot_GetUserName(t *testing.T) {
 		})
 	}
 }
+
+func TestBot_PostMessage(t *testing.T) {
+	fake := newFakeSlack(t, map[string]string{
+		"/api/chat.postMessage": `{"ok":true,"channel":"C0123","ts":"1700000000.000100"}`,
+	})
+	bot := slack.NewBot("xoxb-test", slackgo.OptionAPIURL(fake.apiURL()))
+
+	ts, err := bot.PostMessage(context.Background(), "C0123", "U0OWNER", "Good morning")
+	gt.NoError(t, err).Required()
+	gt.String(t, ts).Equal("1700000000.000100")
+
+	reqs := fake.recorded()
+	gt.Array(t, reqs).Length(1).Required()
+	gt.String(t, reqs[0].Form.Get("channel")).Equal("C0123")
+	gt.Bool(t, reqs[0].Form.Has("thread_ts")).False()
+	blocks := decodeBlocks(t, reqs[0].Form)
+	gt.Array(t, blocks).Length(1).Required()
+	gt.String(t, blocks[0].BlockID).Equal("robin_answer:U0OWNER")
+	gt.String(t, blocks[0].Text).Equal("Good morning")
+}
+
+func TestBot_PostMessageError(t *testing.T) {
+	fake := newFakeSlack(t, map[string]string{
+		"/api/chat.postMessage": `{"ok":false,"error":"not_in_channel"}`,
+	})
+	bot := slack.NewBot("xoxb-test", slackgo.OptionAPIURL(fake.apiURL()))
+	_, err := bot.PostMessage(context.Background(), "C0123", "U0OWNER", "Good morning")
+	gt.Value(t, err).NotNil()
+}

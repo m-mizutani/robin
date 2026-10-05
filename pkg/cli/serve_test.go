@@ -23,6 +23,7 @@ func clearServeEnv(t *testing.T) {
 		"ROBIN_NOTION_CLIENT_ID", "ROBIN_NOTION_CLIENT_SECRET", "ROBIN_NOTION_WORKSPACE_ID", "ROBIN_NOTION_API_URL",
 		"ROBIN_GITHUB_CLIENT_ID", "ROBIN_GITHUB_CLIENT_SECRET",
 		"ROBIN_CONFIG", "ROBIN_LLM_VERTEX_PROJECT_ID", "ROBIN_LLM_VERTEX_REGION", "ROBIN_ANTHROPIC_API_KEY",
+		"ROBIN_SCHEDULE_CONCURRENCY",
 	} {
 		t.Setenv(name, "")
 		gt.NoError(t, os.Unsetenv(name)).Required()
@@ -223,6 +224,18 @@ func TestServe_NoAuthAcceptsSlackAgent(t *testing.T) {
 	err := cli.Run(context.Background(), args, "test")
 	gt.Value(t, err).NotNil().Required()
 	gt.String(t, err.Error()).Contains("HTTP server stopped")
+}
+
+func TestServe_NoAuthNeedsBotTokenAndSigningSecretTogether(t *testing.T) {
+	clearServeEnv(t)
+	for _, extra := range [][]string{
+		{"--slack-bot-token", "xoxb-token"},
+		{"--slack-signing-secret", "signing-secret"},
+	} {
+		err := cli.Run(context.Background(), append(noAuthGitHubArgs(), extra...), "test")
+		gt.Value(t, err).NotNil().Required()
+		gt.String(t, err.Error()).Contains("--slack-bot-token and --slack-signing-secret must be set together")
+	}
 }
 
 func TestServe_SlackAgentNeedsLLM(t *testing.T) {

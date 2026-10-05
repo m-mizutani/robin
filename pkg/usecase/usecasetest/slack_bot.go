@@ -46,6 +46,7 @@ type SlackBot struct {
 	ThreadErr    error // GetThreadMessages
 	GetErr       error // GetMessage
 	DeleteErr    error // DeleteMessage
+	MessageErr   error // PostMessage
 	Thread       []model.SlackThreadMessage
 	Message      *model.SlackPostedMessage
 	nextTS       int
@@ -134,6 +135,19 @@ func (b *SlackBot) DeleteMessage(_ context.Context, channelID, ts string) error 
 	defer b.mu.Unlock()
 	b.record(SlackCall{Method: "DeleteMessage", ChannelID: channelID, TS: ts})
 	return b.DeleteErr
+}
+
+// PostMessage returns ts "1900000000.000001", "...002" and so on.
+func (b *SlackBot) PostMessage(_ context.Context, channelID string, requester model.SlackUserID, markdown string) (string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.nextTS++
+	ts := fmt.Sprintf("1900000000.%06d", b.nextTS)
+	b.record(SlackCall{Method: "PostMessage", ChannelID: channelID, Requester: requester, TS: ts, Text: markdown})
+	if b.MessageErr != nil {
+		return "", b.MessageErr
+	}
+	return ts, nil
 }
 
 // Recorded returns the calls of the given methods, or every call.

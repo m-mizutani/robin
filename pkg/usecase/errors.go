@@ -89,4 +89,12 @@ var (
 	// ErrThreadOwnedByOther means another user owns the conversation of the
 	// thread a mention was posted in.
 	ErrThreadOwnedByOther = errors.New("thread is owned by another user")
+
+	// ErrJobInputInvalid means a malformed channel ID, an unknown time zone, a
+	// time out of range, or a job this build does not define.
+	ErrJobInputInvalid = errors.New("invalid job input")
+
+	// ErrJobSettingRequired means a trigger was added before the user saved
+	// the channel and the time zone.
+	ErrJobSettingRequired = errors.New("job setting is required")
 )
