@@ -570,6 +570,10 @@ Google Cloud credentials are read from Application Default Credentials.
 
 ### Deployment notes
 
+- Every push to a branch builds a container image from `Dockerfile` and
+  pushes it to `ghcr.io/<owner>/robin:<commit SHA>`
+  (`.github/workflows/publish.yml`). The image runs `robin` as its entry
+  point, so pass the command as the argument: `serve` or `schedule`.
 - Robin can run as several instances; state shared between requests is kept in
   Firestore.
 - Slack requires a response within three seconds, so Robin acknowledges an

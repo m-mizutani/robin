@@ -1,0 +1,9 @@
+# Installed on the host for a different platform; the image installs its own.
+frontend/node_modules
+frontend/screenshots
+frontend/test-results
+frontend/playwright-report
+/robin
+.env
+.git
+.claude
