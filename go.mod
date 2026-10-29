@@ -7,7 +7,7 @@ require (
 	cloud.google.com/go/kms v1.35.0
 	github.com/anthropics/anthropic-sdk-go v1.75.0
 	github.com/fatih/color v1.19.0
-	github.com/go-chi/chi/v5 v5.3.2
+	github.com/go-chi/chi/v5 v5.4.0
 	github.com/google/uuid v1.6.0
 	github.com/m-mizutani/clog v0.2.1
 	github.com/m-mizutani/goerr/v2 v2.0.1
